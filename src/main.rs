@@ -34,6 +34,9 @@ const PROTOCOL_VERSION: u8 = 10;
 // const SERVER_CAPABILITIES: u32 = 0x800001ff; // 基本能力集
 const SERVER_LANGUAGE: u8 = 8; // utf8
 const SERVER_STATUS: u16 = 2;
+
+const MAX_PACKET_SIZE: usize = 0xFFFF;
+
 fn build_handshake_packet(scramble: &[u8; 20]) -> BytesMut {
     let mut packet = BytesMut::new();
 
@@ -381,7 +384,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     ServerPhaseDesc::ClientResponse => {
                         // 4. 接收客户端响应
-                        let mut buf = [0; 0xFFFFFF];
+                        let mut buf = [0; MAX_PACKET_SIZE];
                         let n = match socket.read(&mut buf).await {
                             Ok(0) => return,
                             Ok(n) => n,
