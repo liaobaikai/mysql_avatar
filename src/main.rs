@@ -1,9 +1,9 @@
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 use mysql_async::consts::{CapabilityFlags, StatusFlags};
 use mysql_common::{
     io::ParseBuf,
-    packets::{HandshakePacket, HandshakeResponse},
-    proto::{codec::PacketCodec, MyDeserialize, MySerialize},
+    packets::AuthPlugin,
+    proto::{MyDeserialize, MySerialize, codec::PacketCodec},
 };
 
 use tokio::{
@@ -11,81 +11,47 @@ use tokio::{
     net::TcpListener,
 };
 
-// use crate::packets::HandshakeResponse;
+use crate::packets::{HandshakePacket, HandshakeResponse};
 // mod codec;
-// mod packets;
+mod packets;
 
 const SCRAMBLE_BUFFER_SIZE: usize = 20;
 const PLAIN_OK: &[u8] = b"\x00\x01\x00\x02\x00\x00\x00";
 
-// 调整能力集常量，增加常见的认证相关能力
-// const SERVER_CAPABILITIES: u32 = 0x0000_0200 | 0x0000_8000 | 0x0008_0000; // 增加 CLIENT_PLUGIN_AUTH 能力
-// const SCRAMBLE_BUFFER_SIZE: usize = 20;
+const SERVER_VERSION: &str = "8.0.41";
+
+// 协议版本：10
 const PROTOCOL_VERSION: u8 = 10;
-// const SERVER_CAPABILITIES: u32 = 0x800001ff; // 基本能力集
-const SERVER_LANGUAGE: u8 = 8; // utf8
-// const SERVER_STATUS: u16 = 2;
+// 默认语言
+const SERVER_LANGUAGE: u8 = 8;
+// 缓冲区大小
+const READ_BUFFER_SIZE: usize = 0xFFFF;
 
-const MAX_PACKET_SIZE: usize = 0xFFFF;
-
-// fn build_handshake_packet(scramble: &[u8; 20]) -> BytesMut {
-//     let mut packet = BytesMut::new();
-
-//     // 协议版本
-//     packet.put_u8(PROTOCOL_VERSION);
-
-//     // 服务器版本 (例如: 5.7.30)
-//     packet.extend_from_slice(b"8.0.41");
-//     packet.put_u8(0x00);
-
-//     // 连接ID
-//     packet.extend_from_slice(&0x01234567u32.to_le_bytes());
-
-//     // 挑战值前8字节
-//     packet.extend_from_slice(&scramble[0..8]);
-//     packet.put_u8(0x00); // 填充
-
-//     // 服务器能力标志 (低2字节)
-//     packet.extend_from_slice(&(SERVER_CAPABILITIES as u16).to_le_bytes());
-
-//     // 服务器字符集
-//     packet.put_u8(SERVER_LANGUAGE);
-
-//     // 服务器状态
-//     packet.extend_from_slice(&SERVER_STATUS.to_le_bytes());
-
-//     // 服务器能力标志 (高2字节)
-//     packet.extend_from_slice(&((SERVER_CAPABILITIES >> 16) as u16).to_le_bytes());
-
-//     // 挑战值长度
-//     packet.put_u8(SCRAMBLE_BUFFER_SIZE as u8);
-
-//     // 保留字节
-//     packet.extend_from_slice(&[0; 10]);
-
-//     // 挑战值剩余部分
-//     packet.extend_from_slice(&scramble[8..]);
-//     packet.put_u8(0x00); // 终止符
-
-//     packet
-// }
-
-// 构建握手包
-fn new_handshake_packet(scramble: &[u8; 20]) -> BytesMut {
+// Build Handshake Packet
+// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_phase_packets_protocol_handshake_v10.html
+fn new_handshake_packet(scramble: &[u8; SCRAMBLE_BUFFER_SIZE]) -> BytesMut {
     let mut scramble_1 = [0u8; 8];
     let (_scramble_1, scramble_2) = scramble.split_at(8);
     scramble_1.copy_from_slice(&_scramble_1);
 
+    let capabilities = CapabilityFlags::CLIENT_PROTOCOL_41
+        | CapabilityFlags::CLIENT_PLUGIN_AUTH
+        | CapabilityFlags::CLIENT_SECURE_CONNECTION
+        | CapabilityFlags::CLIENT_CONNECT_WITH_DB
+        | CapabilityFlags::CLIENT_TRANSACTIONS
+        | CapabilityFlags::CLIENT_CONNECT_ATTRS
+        | CapabilityFlags::CLIENT_DEPRECATE_EOF;
+
     let packet = HandshakePacket::new(
         PROTOCOL_VERSION,
-        "8.0.41".as_bytes(),
-        0x01234567u32,
+        SERVER_VERSION.as_bytes(),
+        0x0000000b,
         scramble_1,
         Some(scramble_2),
-        CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_SECURE_CONNECTION,
+        capabilities,
         SERVER_LANGUAGE,
-        StatusFlags::default(),
-        Some(b"mysql_native_password"),
+        StatusFlags::SERVER_STATUS_AUTOCOMMIT,
+        AuthPlugin::MysqlNativePassword.as_bytes().into(),
     );
 
     let mut src = BytesMut::new();
@@ -95,121 +61,50 @@ fn new_handshake_packet(scramble: &[u8; 20]) -> BytesMut {
     src
 }
 
-// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_phase_packets_protocol_handshake_v10.html
-// 发送握手初始化包
-async fn send_handshake_packet(
-    scramble: &[u8; 20],
-    _packet_codec: &mut PacketCodec,
-) -> Result<BytesMut, Box<dyn std::error::Error>> {
-    // 发送数据包 (长度前缀 + 序列号 + 数据)
-
-    // sent::dst: b"4\0\0\0\n8.0.41\0gE#\x01\x1c!\x8bH\xe1h\x83\xf6\0\0\x82\x08\x02\0\x08\0\x14\0\0\0\0\0\0\0\0\0\0I\x0f\x06\x15\x03\xf4x&F\xee\x92g\0"
-    // sent::dst: b"I\0\0\0\n8.0.41\0gE#\x01\xd7\xe4\xe7z\xfa\x1c\xe8\xeb\0\0\x82\x08\0\0\x08\0\x14\0\0\0\0\0\0\0\0\0\03LC\xd4\xae\xf1\xcc\0\x18\xc8\xd1Omysql_native_password\0"
-
-    // ServerResponse:: buffer:: b"4\0\0\0\n5.7.30\0gE#\x01\xda\x13g\x1e\x9c\xe5\xa8\xec\0\xff\x01\x08\x02\0\x08\x80\x14\0\0\0\0\0\0\0\0\0\0\xaf\xf6\xfc\xdd\x98\xefC\x92\x02D\xf9\xd6\0"
-    let src = new_handshake_packet(scramble);
-    // let mut src = build_handshake_packet(scramble);
-    // let mut dst = BytesMut::new();
-
-    // println!("sent::src.first: {:?}", src.to_vec());
-    // packet_codec.encode(&mut src, &mut dst).unwrap();
-    // println!("sent::dst: {dst:?}");
-
-    // stream.write_all(&dst).await?;
-    // stream.flush().await?;
-
-    // send_packet(stream, &mut src).await?;
-    Ok(src)
-}
-
 // 接收并解析客户端握手响应
 async fn handle_handshake_response<'a>(
     src: &mut BytesMut,
-    scramble: &[u8; 20],
+    scramble: &[u8; SCRAMBLE_BUFFER_SIZE],
 ) -> Result<BytesMut, Box<dyn std::error::Error>> {
     println!("resp::src: {:?}", src);
     println!("resp::src:vec: {:?}", src.to_vec());
 
-    // No SSL Exchange
-    // resp::src: b"P\0\0\x01\x81\xa2\x0f\x01\0\0@\0-\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0root\0\x14\x8e\x1cp\n\r\x15\x01O\xd5\xe2\xc7$p\xda\xcfGs\x04q\x1bmysql_native_password\0"
-    // resp::dst: b"\x81\xa2\x0f\x01\0\0@\0-\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0root\0\x14\x8e\x1cp\n\r\x15\x01O\xd5\xe2\xc7$p\xda\xcfGs\x04q\x1bmysql_native_password\0"
+    let resp = HandshakeResponse::deserialize((), &mut ParseBuf(&src))?;
 
-    // SSL Exchange
-    // resp::src: b" \0\0\x01\x85\xae\xff\x19\0\0\0\x01\x1c\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
-    // resp::dst: b"\x85\xae\xff\x19\0\0\0\x01\x1c\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"
+    println!("{:?}", resp);
 
-    // resp::src: b"&\0\0\x01\x85\xa6\xff\x19\0\0\0\x01\xff\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0root\0\0"
-    // resp::dst: b"\x85\xa6\xff\x19\0\0\0\x01\xff\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0root\0\0"
+    let mut auth = false;
+    let user = String::from_utf8_lossy(resp.user()).to_string();
+    let empty_pass = if resp.scramble_buf().len() > 0 {
+        "YES"
+    } else {
+        "NO"
+    };
 
-    let mut buf = ParseBuf(&src);
-    // match OldHandshakeResponse::deserialize((), &mut buf) {
-    //     Ok(ok) => {
-    //         println!("ok: {:?}", ok);
-    //     },
-    //     Err(e) => {
-    //         println!("{:?}", e);
-    //     }
-    // }
-
-    // if let Ok(ssl_request) = SslRequest::deserialize((), &mut buf) {
-    //     // ssl_request:SslRequest { capabilities: Const(CapabilityFlags(CLIENT_LONG_PASSWORD | CLIENT_LONG_FLAG | CLIENT_LOCAL_FILES | CLIENT_PROTOCOL_41 | CLIENT_INTERACTIVE | CLIENT_SSL | CLIENT_TRANSACTIONS | CLIEN0\x16\0\0\0\x17\0\0\0\r\0*\0(\x04\x03\x05\x03\x06\x03\x08\x07\x08\x08\x0T_SECURE_CONNECTION | CLIENT_MULTI_STATEMENTS | CLIENT_MULTI_RESULTS | CLIENT_PS_MULTI_RESULTS | CLIENT_PLUGIN_AUTH | CLIENT_CONNECT_ATTRS | CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA | CLIENT_CAN_HANDLE_EXPIREDxcb\xbd\x1eqsXk\xee\xf1\xf4\x9e\x1e/\xe5WU%\xba\0c\xba\xa1J\x13\x9f\xd2\_PASSWORDS | CLIENT_SESSION_TRACK | CLIENT_DEPRECATE_EOF | CLIENT_QUERY_ATTRIBUTES | MULTI_FACTOR_AUTHENTICATION), PhantomData<mysql_common::misc::raw::int::LeU32>),
-    //     // max_packet_size: 16777216, character_set: 28, __skip: Skip }
-    //     println!("ssl_request:{:?}", ssl_request);
-
-    //     if ssl_request
-    //         .capabilities()
-    //         .contains(CapabilityFlags::CLIENT_SSL)
-    //     {
-    //         // 同意SSL
-    //         // src.clear();
-    //         dst.clear();
-    //         // src.put_u8(0x00);
-    //         // packet_codec.encode(src, &mut dst).unwrap();
-
-    //         // 不支持SSL
-    //         // 返回Err_Packet
-    //         let server_error = ServerError::new(
-    //             2026,
-    //             None,
-    //             "ER_SSL_NOT_SUPPORTED".as_bytes(),
-    //             ssl_request.capabilities(),
-    //         );
-    //         let mut buf = Vec::new();
-    //         server_error.serialize(&mut buf);
-    //         dst.extend_from_slice(&buf);
-    //     }
-    //     return Ok(dst);
-    // }
-
-    let response = HandshakeResponse::deserialize((), &mut buf)?;
-
-    println!("{:?}", response);
-    // response: HandshakeResponse { capabilities: Const(CapabilityFlags(CLIENT_LONG_PASSWORD | CLIENT_LOCAL_FILES | CLIENT_PROTOCOL_41 | CLIENT_TRANSACTIONS | CLIENT_SECURE_CONNECTION | CLIENT_MULTI_STATEMENTS | CLIENT_MULTI_RESULTS | CLIENT_PS_MULTI_RESULTS | CLIENT_PLUGIN_AUTH | CLIENT_DEPRECATE_EOF), PhantomData<mysql_common::misc::raw::int::LeU32>),
-    // max_packet_size: 4194304, collation: 45, scramble_buf: Right(Left(RawBytes { value: "�iRc�$���ǠD�b�'��j\u{19}", max_len: "255" })),
-    // user: RawBytes { value: "root", max_len: "18446744073709551615" }, db_name: None, auth_plugin: Some(MysqlNativePassword),
-    // connect_attributes: None, mariadb_ext_capabilities: Const(MariadbCapabilities(0x0), PhantomData<mysql_common::misc::raw::int::LeU32>) }
-    if response
+    if resp
         .capabilities()
         .contains(CapabilityFlags::CLIENT_PLUGIN_AUTH)
     {
-        if let Some(auth_plugin) = response.auth_plugin() {
+        if let Some(auth_plugin) = resp.auth_plugin() {
             if let Some(data) = auth_plugin.gen_data(Some("123456"), scramble) {
                 match data {
                     mysql_common::packets::AuthPluginData::Old(_p) => {}
                     mysql_common::packets::AuthPluginData::Native(p) => {
-                        println!("p: {:?}", p);
-                        println!("scramble_buf: {:?}", response.scramble_buf());
-                        if p == response.scramble_buf() {
+                        println!("local_passwd: {:?}", p);
+                        println!("scramble_buf: {:?}", resp.scramble_buf());
+                        if p == resp.scramble_buf() {
                             src.clear();
                             src.extend_from_slice(PLAIN_OK);
+                            auth = true;
                         }
                     }
                     mysql_common::packets::AuthPluginData::Sha2(p) => {
                         println!("p: {:?}", p);
-                        println!("scramble_buf: {:?}", response.scramble_buf());
-                        if p == response.scramble_buf() {
+                        println!("scramble_buf: {:?}", resp.scramble_buf());
+                        if p == resp.scramble_buf() {
                             src.clear();
                             src.extend_from_slice(PLAIN_OK);
+                            auth = true;
                         }
                     }
                     mysql_common::packets::AuthPluginData::Clear(_p) => {}
@@ -219,57 +114,27 @@ async fn handle_handshake_response<'a>(
         }
     }
 
-    // src.extend_from_slice(PLAIN_OK);
-    // packet_codec.encode(src, &mut dst).unwrap();
+    if !auth {
+        src.clear();
+        // 错误包标志
+        src.put_u8(0xff);
+        // 错误代码 (1045 = 访问被拒绝)
+        src.extend_from_slice(&0x0415u16.to_le_bytes());
+        // SQL状态标志
+        src.put_u8(0x23); // '#'
+        src.extend_from_slice(b"28000"); // 访问被拒绝的SQL状态码
+        // 错误消息
+        src.extend_from_slice(
+            format!(
+                "Access denied for user '{}'@'localhost' (using password: {})",
+                user, empty_pass
+            )
+            .as_bytes(),
+        );
+    }
 
-    let mut dst = BytesMut::new();
-    dst.extend_from_slice(PLAIN_OK);
-    Ok(dst)
+    Ok(std::mem::take(src))
 }
-
-// 验证客户端凭据
-// fn verify_credentials(
-//     user_db: &UserDB,
-//     response: &HandshakeResponse,
-//     scramble: &[u8; 20],
-// ) -> Result<bool, Box<dyn std::error::Error>> {
-// let password_hash = match user_db.get_password_hash(&response.username) {
-//     Some(hash) => hash,
-//     None => return Ok(false),
-// };
-
-// if response.auth_response.is_empty() {
-//     return Ok(false);
-// }
-
-// MySQL认证算法：
-// 1. 服务器：生成随机挑战值 scramble
-// 2. 客户端：计算 SHA1(password) XOR SHA1(scramble + SHA1(SHA1(password)))
-// 3. 服务器：使用存储的 SHA1(password) 重新计算并比较
-
-// 将存储的哈希转换为字节
-// let stored_hash = password_hash.as_bytes();
-// if stored_hash.len() != 20 {
-//     return Ok(false);
-// }
-
-// // 计算 SHA1(scramble + stored_hash)
-// let mut sha1 = Sha1::new();
-// sha1.update(scramble);
-// sha1.update(&stored_hash);
-// let hash_stage2 = sha1.finalize();
-
-// // 计算客户端应有的响应：stored_hash XOR hash_stage2
-// let expected_response: Vec<u8> = stored_hash.iter()
-//     .zip(hash_stage2.as_slice().iter())
-//     .map(|(a, b)| a ^ b)
-//     .collect();
-
-// 比较客户端响应与计算结果
-// Ok(expected_response == response.auth_response)
-
-//     Ok(true)
-// }
 
 // 发送OK包
 // async fn send_ok_packet(
@@ -304,7 +169,6 @@ async fn handle_handshake_response<'a>(
 //     packet_codec: &mut PacketCodec,
 // ) -> Result<(), Box<dyn std::error::Error>> {
 //     let mut packet = BytesMut::new();
-
 //     // 错误包标志
 //     packet.put_u8(0xff);
 
@@ -335,7 +199,9 @@ enum ServerPhaseDesc {
     ClientResponse, // Read
     ServerResponse, // Write
     ClientHandshakeResponse,
+    #[allow(unused)]
     AuthenticationMethodSwitch,
+    #[allow(unused)]
     AuthenticationExchangeContinuation,
 }
 
@@ -363,9 +229,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         rand::Rng::fill(&mut rand::thread_rng(), &mut scramble);
 
                         // 2. 发送初始握手包
-                        buffer = send_handshake_packet(&scramble, &mut packet_codec)
-                            .await
-                            .unwrap();
+                        buffer = new_handshake_packet(&scramble);
+                        println!("buffer.len: {:?}", buffer.len());
 
                         // 3 发送挑战包给客户端
                         status = ServerPhaseDesc::ServerResponse;
@@ -375,7 +240,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     ServerPhaseDesc::ClientResponse => {
                         // 4. 接收客户端响应
-                        let mut buf = [0; MAX_PACKET_SIZE];
+                        let mut buf = [0; READ_BUFFER_SIZE];
                         let n = match socket.read(&mut buf).await {
                             Ok(0) => return,
                             Ok(n) => n,
@@ -385,11 +250,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         };
 
+                        let data = &buf[0..n];
+                        println!("recv:buf:{:?}", data);
+
+                        buffer.clear();
                         let mut src = BytesMut::new();
-                        src.extend_from_slice(&buf[0..n].to_vec());
+                        src.extend_from_slice(data);
+                        println!("recv:buffer:src:{:?}", src);
+                        // !!!!!!! decode后buffer没有数据，且没有报错，待查
                         packet_codec.decode(&mut src, &mut buffer).unwrap();
+                        // 临时用切片的方式，因为还要用packet_codec.seq_id
+                        // buffer.clear();
+                        // buffer.extend_from_slice(&data[4..]);
 
                         println!("recv:buffer:{:?}", buffer);
+                        println!("recv:buffer:vec:{:?}", buffer.to_vec());
 
                         match next_status {
                             // 5. 解析握手包
@@ -427,6 +302,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 eprintln!("failed to write to socket; err = {:?}", e);
                                 return;
                             }
+                            buffer.clear();
                             socket.flush().await.unwrap();
                         }
 
@@ -454,6 +330,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+#[allow(unused)]
 #[cfg(test)]
 mod tests {
     use bytes::{BufMut, BytesMut};
@@ -473,6 +350,7 @@ mod tests {
     #[test]
     fn test_handshake_packet() {
         let mut scramble = [0u8; 20];
+        #[allow(deprecated)]
         rand::Rng::fill(&mut rand::thread_rng(), &mut scramble);
         let mut scramble_1 = [0u8; 8];
         let (_scramble_1, scramble_2) = scramble.split_at(8);
