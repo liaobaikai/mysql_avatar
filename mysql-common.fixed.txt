@@ -1,0 +1,62 @@
+
+
+./mysql_common-0.35.5/src/packets/mod.rs
+2285 UUUUUUUUUUUUUUU
+if client_flags.0 & CapabilityFlags::CLIENT_CONNECT_ATTRS.bits() > 0 {
+            if buf.len() > 0 {
+                connect_attributes = Some(deserialize_connect_attrs(&mut *buf)?);
+            }
+        }
+
+
+
+./mysql_common-0.35.5/src/proto/codec/mod.rs
+impl PlainPacketCodec {
+    /// Sets sequence id to `0`.
+    fn reset_seq_id(&mut self) {
+        self.seq_id = 0;
+    }
+
+    +++++++++++++++++++++++++++++++++
+    fn increment(&mut self) {
+        self.seq_id += 1;
+    }
+    +++++++++++++++++++++++++++++++++
+
+
+
+impl PacketCodecInner {
+    /// Sets sequence id to `0`.
+    fn reset_seq_id(&mut self) {
+        match self {
+            PacketCodecInner::Plain(c) => c.reset_seq_id(),
+            PacketCodecInner::Comp(c) => c.reset_seq_id(),
+        }
+    }
+    +++++++++++++++++++++++++++++++++
+    fn increment(&mut self) {
+        match self {
+            PacketCodecInner::Plain(c) => c.increment(),
+            PacketCodecInner::Comp(c) => c.increment(),
+        }
+    }
+    +++++++++++++++++++++++++++++++++
+
+
+
+impl PacketCodec {
+    /// Sets sequence id to `0`.
+    pub fn reset_seq_id(&mut self) {
+        self.inner.reset_seq_id();
+    }
+
+    /// Overwrites plain sequence id with compressed sequence id.
+    pub fn sync_seq_id(&mut self) {
+        self.inner.sync_seq_id();
+    }
+
+    ++++++++++++++++++++++++++++
+    pub fn increment(&mut self) {
+        self.inner.increment();
+    }
+    ++++++++++++++++++++++++++++

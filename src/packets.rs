@@ -1,16 +1,232 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::HashMap, io};
 
 use bytes::BufMut;
-use mysql_async::consts::{CapabilityFlags, StatusFlags};
+use mysql_async::consts::{CapabilityFlags, MariadbCapabilities, StatusFlags};
 use mysql_common::{
+    collations::CollationId,
+    io::ParseBuf,
     misc::raw::{
-        Const, RawBytes, RawInt,
-        bytes::{EofBytes, U8Bytes},
-        int::{LeU16, LenEnc},
+        Const, Either, RawBytes, RawConst, RawInt, Skip,
+        bytes::{EofBytes, NullBytes, U8Bytes},
+        int::{LeU16, LeU32, LenEnc},
     },
-    packets::{ErrPacketHeader, ProgressReport, SqlState},
-    proto::MySerialize,
+    packets::{AuthPlugin, ErrPacketHeader, ProgressReport, SqlState},
+    proto::{MyDeserialize, MySerialize},
 };
+
+//
+// pub type HandshakeResponse41 = HandshakeResponse;
+
+/// Actual serialization of this field depends on capability flags values.
+// type ScrambleBuf<'a> =
+//     Either<RawBytes<'a, LenEnc>, Either<RawBytes<'a, U8Bytes>, RawBytes<'a, NullBytes>>>;
+type ScrambleBuf<'a> =
+    Either<RawBytes<'a, LenEnc>, Either<RawBytes<'a, U8Bytes>, RawBytes<'a, NullBytes>>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandshakeResponse<'a> {
+    capabilities: Const<CapabilityFlags, LeU32>,
+    max_packet_size: RawInt<LeU32>,
+    collation: RawInt<u8>,
+    scramble_buf: ScrambleBuf<'a>,
+    user: RawBytes<'a, NullBytes>,
+    db_name: Option<RawBytes<'a, NullBytes>>,
+    auth_plugin: Option<AuthPlugin<'a>>,
+    connect_attributes: Option<HashMap<RawBytes<'a, LenEnc>, RawBytes<'a, LenEnc>>>,
+    mariadb_ext_capabilities: Const<MariadbCapabilities, LeU32>,
+}
+
+impl<'a> HandshakeResponse<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        scramble_buf: Option<impl Into<Cow<'a, [u8]>>>,
+        server_version: (u16, u16, u16),
+        user: Option<impl Into<Cow<'a, [u8]>>>,
+        db_name: Option<impl Into<Cow<'a, [u8]>>>,
+        auth_plugin: Option<AuthPlugin<'a>>,
+        mut capabilities: CapabilityFlags,
+        connect_attributes: Option<HashMap<String, String>>,
+        max_packet_size: u32,
+    ) -> Self {
+        let scramble_buf =
+            if capabilities.contains(CapabilityFlags::CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA) {
+                Either::Left(RawBytes::new(
+                    scramble_buf.map(Into::into).unwrap_or_default(),
+                ))
+            } else if capabilities.contains(CapabilityFlags::CLIENT_SECURE_CONNECTION) {
+                Either::Right(Either::Left(RawBytes::new(
+                    scramble_buf.map(Into::into).unwrap_or_default(),
+                )))
+            } else {
+                Either::Right(Either::Right(RawBytes::new(
+                    scramble_buf.map(Into::into).unwrap_or_default(),
+                )))
+            };
+
+        if db_name.is_some() {
+            capabilities.insert(CapabilityFlags::CLIENT_CONNECT_WITH_DB);
+        } else {
+            capabilities.remove(CapabilityFlags::CLIENT_CONNECT_WITH_DB);
+        }
+
+        if auth_plugin.is_some() {
+            capabilities.insert(CapabilityFlags::CLIENT_PLUGIN_AUTH);
+        } else {
+            capabilities.remove(CapabilityFlags::CLIENT_PLUGIN_AUTH);
+        }
+
+        if connect_attributes.is_some() {
+            capabilities.insert(CapabilityFlags::CLIENT_CONNECT_ATTRS);
+        } else {
+            capabilities.remove(CapabilityFlags::CLIENT_CONNECT_ATTRS);
+        }
+
+        Self {
+            scramble_buf,
+            collation: if server_version >= (5, 5, 3) {
+                RawInt::new(CollationId::UTF8MB4_GENERAL_CI as u8)
+            } else {
+                RawInt::new(CollationId::UTF8MB3_GENERAL_CI as u8)
+            },
+            user: user.map(RawBytes::new).unwrap_or_default(),
+            db_name: db_name.map(RawBytes::new),
+            auth_plugin,
+            capabilities: Const::new(capabilities),
+            connect_attributes: connect_attributes.map(|attrs| {
+                attrs
+                    .into_iter()
+                    .map(|(k, v)| (RawBytes::new(k.into_bytes()), RawBytes::new(v.into_bytes())))
+                    .collect()
+            }),
+            max_packet_size: RawInt::new(max_packet_size),
+            mariadb_ext_capabilities: Const::new(MariadbCapabilities::empty()),
+        }
+    }
+
+    pub fn with_mariadb_ext_capabilities(
+        mut self,
+        mariadb_ext_capabilities: MariadbCapabilities,
+    ) -> Self {
+        self.mariadb_ext_capabilities = Const::new(mariadb_ext_capabilities);
+        self
+    }
+
+    pub fn capabilities(&self) -> CapabilityFlags {
+        self.capabilities.0
+    }
+
+    pub fn mariadb_ext_capabilities(&self) -> MariadbCapabilities {
+        self.mariadb_ext_capabilities.0
+    }
+
+    pub fn collation(&self) -> u8 {
+        self.collation.0
+    }
+
+    pub fn scramble_buf(&self) -> &[u8] {
+        match &self.scramble_buf {
+            Either::Left(x) => x.as_bytes(),
+            Either::Right(x) => match x {
+                Either::Left(x) => x.as_bytes(),
+                Either::Right(x) => x.as_bytes(),
+            },
+        }
+    }
+
+    pub fn user(&self) -> &[u8] {
+        self.user.as_bytes()
+    }
+
+    pub fn db_name(&self) -> Option<&[u8]> {
+        self.db_name.as_ref().map(|x| x.as_bytes())
+    }
+
+    pub fn auth_plugin(&self) -> Option<&AuthPlugin<'a>> {
+        self.auth_plugin.as_ref()
+    }
+
+    #[must_use = "entails computation"]
+    pub fn connect_attributes(&self) -> Option<HashMap<String, String>> {
+        self.connect_attributes.as_ref().map(|attrs| {
+            attrs
+                .iter()
+                .map(|(k, v)| (k.as_str().into_owned(), v.as_str().into_owned()))
+                .collect()
+        })
+    }
+}
+
+impl<'de> MyDeserialize<'de> for HandshakeResponse<'de> {
+    const SIZE: Option<usize> = None;
+    type Ctx = ();
+
+    fn deserialize((): Self::Ctx, buf: &mut ParseBuf<'de>) -> io::Result<Self> {
+        let mut sbuf: ParseBuf<'_> = buf.parse(4 + 4 + 1 + 23)?;
+        let client_flags: RawConst<LeU32, CapabilityFlags> = sbuf.parse_unchecked(())?;
+        let max_packet_size: RawInt<LeU32> = sbuf.parse_unchecked(())?;
+        let collation = sbuf.parse_unchecked(())?;
+        sbuf.parse_unchecked::<Skip<19>>(())?;
+        let mariadb_flags: RawConst<LeU32, MariadbCapabilities> = sbuf.parse_unchecked(())?;
+        let user = buf.parse(())?;
+
+        let like_db_name = buf.0.first() == Some(&0);
+        let scramble_buf =
+            if client_flags.0 & CapabilityFlags::CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA.bits() > 0 {
+                Either::Left(buf.parse(())?)
+            } else if client_flags.0 & CapabilityFlags::CLIENT_SECURE_CONNECTION.bits() > 0 {
+                Either::Right(Either::Left(buf.parse(())?))
+            } else {
+                Either::Right(Either::Right(buf.parse(())?))
+            };
+
+        let mut db_name = None;
+        if !like_db_name {
+            if client_flags.0 & CapabilityFlags::CLIENT_CONNECT_WITH_DB.bits() > 0 {
+                db_name = buf.parse(()).map(Some)?;
+            }
+        }
+
+        let mut auth_plugin = None;
+        if client_flags.0 & CapabilityFlags::CLIENT_PLUGIN_AUTH.bits() > 0 && !buf.is_empty() {
+            let auth_plugin_name = buf.eat_null_str();
+            auth_plugin = Some(AuthPlugin::from_bytes(auth_plugin_name));
+        }
+
+        let mut connect_attributes = None;
+        if client_flags.0 & CapabilityFlags::CLIENT_CONNECT_ATTRS.bits() > 0 && !buf.is_empty() {
+            connect_attributes = Some(deserialize_connect_attrs(&mut *buf)?);
+        }
+
+        Ok(Self {
+            capabilities: Const::new(CapabilityFlags::from_bits_truncate(client_flags.0)),
+            max_packet_size,
+            collation,
+            scramble_buf,
+            user,
+            db_name,
+            auth_plugin,
+            connect_attributes,
+            mariadb_ext_capabilities: Const::new(MariadbCapabilities::from_bits_truncate(
+                mariadb_flags.0,
+            )),
+        })
+    }
+}
+
+// Helper that deserializes connect attributes.
+fn deserialize_connect_attrs<'de>(
+    buf: &mut ParseBuf<'de>,
+) -> io::Result<HashMap<RawBytes<'de, LenEnc>, RawBytes<'de, LenEnc>>> {
+    let data_len = buf.parse::<RawInt<LenEnc>>(())?;
+    let mut data: ParseBuf<'_> = buf.parse(data_len.0 as usize)?;
+    let mut attrs = HashMap::new();
+    while !data.is_empty() {
+        let key = data.parse::<RawBytes<'_, LenEnc>>(())?;
+        let value = data.parse::<RawBytes<'_, LenEnc>>(())?;
+        attrs.insert(key, value);
+    }
+    Ok(attrs)
+}
 
 /// Represents MySql's Ok packet.
 #[derive(Debug, Clone, Eq, PartialEq)]
