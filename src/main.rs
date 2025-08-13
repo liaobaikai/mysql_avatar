@@ -1,15 +1,9 @@
-use bytes::{Buf, BufMut, BytesMut};
-use mysql_async::{
-    OkPacket,
-    consts::{CapabilityFlags, StatusFlags},
-};
+use bytes::{Buf, BytesMut};
+use mysql_async::consts::{CapabilityFlags, StatusFlags};
 use mysql_common::{
     io::ParseBuf,
-    packets::{
-        AuthSwitchRequest, ErrPacket, HandshakePacket, OkPacketBody, SqlState, SqlStateMarker,
-        SslRequest,
-    },
-    proto::{MyDeserialize, MySerialize, codec::PacketCodec},
+    packets::{HandshakePacket, HandshakeResponse},
+    proto::{codec::PacketCodec, MyDeserialize, MySerialize},
 };
 
 use tokio::{
@@ -17,67 +11,64 @@ use tokio::{
     net::TcpListener,
 };
 
-use crate::{
-    codec::PlainPacketCodec,
-    packets::{HandshakeResponse, ServerError},
-};
-mod codec;
-mod packets;
+// use crate::packets::HandshakeResponse;
+// mod codec;
+// mod packets;
 
 const SCRAMBLE_BUFFER_SIZE: usize = 20;
 const PLAIN_OK: &[u8] = b"\x00\x01\x00\x02\x00\x00\x00";
 
 // 调整能力集常量，增加常见的认证相关能力
-const SERVER_CAPABILITIES: u32 = 0x0000_0200 | 0x0000_8000 | 0x0008_0000; // 增加 CLIENT_PLUGIN_AUTH 能力
+// const SERVER_CAPABILITIES: u32 = 0x0000_0200 | 0x0000_8000 | 0x0008_0000; // 增加 CLIENT_PLUGIN_AUTH 能力
 // const SCRAMBLE_BUFFER_SIZE: usize = 20;
 const PROTOCOL_VERSION: u8 = 10;
 // const SERVER_CAPABILITIES: u32 = 0x800001ff; // 基本能力集
 const SERVER_LANGUAGE: u8 = 8; // utf8
-const SERVER_STATUS: u16 = 2;
+// const SERVER_STATUS: u16 = 2;
 
 const MAX_PACKET_SIZE: usize = 0xFFFF;
 
-fn build_handshake_packet(scramble: &[u8; 20]) -> BytesMut {
-    let mut packet = BytesMut::new();
+// fn build_handshake_packet(scramble: &[u8; 20]) -> BytesMut {
+//     let mut packet = BytesMut::new();
 
-    // 协议版本
-    packet.put_u8(PROTOCOL_VERSION);
+//     // 协议版本
+//     packet.put_u8(PROTOCOL_VERSION);
 
-    // 服务器版本 (例如: 5.7.30)
-    packet.extend_from_slice(b"8.0.41");
-    packet.put_u8(0x00);
+//     // 服务器版本 (例如: 5.7.30)
+//     packet.extend_from_slice(b"8.0.41");
+//     packet.put_u8(0x00);
 
-    // 连接ID
-    packet.extend_from_slice(&0x01234567u32.to_le_bytes());
+//     // 连接ID
+//     packet.extend_from_slice(&0x01234567u32.to_le_bytes());
 
-    // 挑战值前8字节
-    packet.extend_from_slice(&scramble[0..8]);
-    packet.put_u8(0x00); // 填充
+//     // 挑战值前8字节
+//     packet.extend_from_slice(&scramble[0..8]);
+//     packet.put_u8(0x00); // 填充
 
-    // 服务器能力标志 (低2字节)
-    packet.extend_from_slice(&(SERVER_CAPABILITIES as u16).to_le_bytes());
+//     // 服务器能力标志 (低2字节)
+//     packet.extend_from_slice(&(SERVER_CAPABILITIES as u16).to_le_bytes());
 
-    // 服务器字符集
-    packet.put_u8(SERVER_LANGUAGE);
+//     // 服务器字符集
+//     packet.put_u8(SERVER_LANGUAGE);
 
-    // 服务器状态
-    packet.extend_from_slice(&SERVER_STATUS.to_le_bytes());
+//     // 服务器状态
+//     packet.extend_from_slice(&SERVER_STATUS.to_le_bytes());
 
-    // 服务器能力标志 (高2字节)
-    packet.extend_from_slice(&((SERVER_CAPABILITIES >> 16) as u16).to_le_bytes());
+//     // 服务器能力标志 (高2字节)
+//     packet.extend_from_slice(&((SERVER_CAPABILITIES >> 16) as u16).to_le_bytes());
 
-    // 挑战值长度
-    packet.put_u8(SCRAMBLE_BUFFER_SIZE as u8);
+//     // 挑战值长度
+//     packet.put_u8(SCRAMBLE_BUFFER_SIZE as u8);
 
-    // 保留字节
-    packet.extend_from_slice(&[0; 10]);
+//     // 保留字节
+//     packet.extend_from_slice(&[0; 10]);
 
-    // 挑战值剩余部分
-    packet.extend_from_slice(&scramble[8..]);
-    packet.put_u8(0x00); // 终止符
+//     // 挑战值剩余部分
+//     packet.extend_from_slice(&scramble[8..]);
+//     packet.put_u8(0x00); // 终止符
 
-    packet
-}
+//     packet
+// }
 
 // 构建握手包
 fn new_handshake_packet(scramble: &[u8; 20]) -> BytesMut {
@@ -397,6 +388,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let mut src = BytesMut::new();
                         src.extend_from_slice(&buf[0..n].to_vec());
                         packet_codec.decode(&mut src, &mut buffer).unwrap();
+
+                        println!("recv:buffer:{:?}", buffer);
 
                         match next_status {
                             // 5. 解析握手包
