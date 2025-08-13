@@ -381,7 +381,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     ServerPhaseDesc::ClientResponse => {
                         // 4. 接收客户端响应
-                        let mut buf = [0; 4096];
+                        let mut buf = [0; 0xFFFFFF];
                         let n = match socket.read(&mut buf).await {
                             Ok(0) => return,
                             Ok(n) => n,
