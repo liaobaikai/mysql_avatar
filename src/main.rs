@@ -1,23 +1,23 @@
-use bytes::{Buf, BufMut, BytesMut};
+use std::sync::Arc;
+
+use bytes::{Buf, BytesMut};
 use mysql_async::consts::{CapabilityFlags, StatusFlags};
 use mysql_common::{
-    io::ParseBuf,
-    packets::AuthPlugin,
-    proto::{MyDeserialize, MySerialize, codec::PacketCodec},
+    io::ParseBuf, misc::raw::{bytes::{EofBytes}, int::LenEnc, RawBytes, RawInt}, packets::{AuthPlugin, SqlState}, proto::{codec::PacketCodec, MyDeserialize, MySerialize}
 };
 
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
+    sync::Mutex,
 };
 
-use crate::packets::{HandshakePacket, HandshakeResponse};
+use crate::{constants::Command, packets::{ErrPacket, HandshakePacket, HandshakeResponse, OkPacket, ServerError}};
 // mod codec;
 mod packets;
+mod constants;
 
 const SCRAMBLE_BUFFER_SIZE: usize = 20;
-const PLAIN_OK: &[u8] = b"\x00\x01\x00\x02\x00\x00\x00";
-
 const SERVER_VERSION: &str = "8.0.41";
 
 // 协议版本：10
@@ -27,31 +27,37 @@ const SERVER_LANGUAGE: u8 = 8;
 // 缓冲区大小
 const READ_BUFFER_SIZE: usize = 0xFFFF;
 
-// Build Handshake Packet
-// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_phase_packets_protocol_handshake_v10.html
-fn new_handshake_packet(scramble: &[u8; SCRAMBLE_BUFFER_SIZE]) -> BytesMut {
-    let mut scramble_1 = [0u8; 8];
-    let (_scramble_1, scramble_2) = scramble.split_at(8);
-    scramble_1.copy_from_slice(&_scramble_1);
-
-    let capabilities = CapabilityFlags::CLIENT_PROTOCOL_41
+fn get_capabilities() -> CapabilityFlags {
+    CapabilityFlags::CLIENT_PROTOCOL_41
         | CapabilityFlags::CLIENT_PLUGIN_AUTH
         | CapabilityFlags::CLIENT_SECURE_CONNECTION
         | CapabilityFlags::CLIENT_CONNECT_WITH_DB
         | CapabilityFlags::CLIENT_TRANSACTIONS
         | CapabilityFlags::CLIENT_CONNECT_ATTRS
-        | CapabilityFlags::CLIENT_DEPRECATE_EOF;
+        | CapabilityFlags::CLIENT_DEPRECATE_EOF
+}
+
+fn get_server_status() -> StatusFlags {
+    StatusFlags::SERVER_STATUS_AUTOCOMMIT
+}
+
+// Build Handshake Packet
+// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_phase_packets_protocol_handshake_v10.html
+fn new_handshake_packet(scramble: &[u8; SCRAMBLE_BUFFER_SIZE], connection_id: u32) -> BytesMut {
+    let mut scramble_1 = [0u8; 8];
+    let (_scramble_1, scramble_2) = scramble.split_at(8);
+    scramble_1.copy_from_slice(&_scramble_1);
 
     let packet = HandshakePacket::new(
         PROTOCOL_VERSION,
         SERVER_VERSION.as_bytes(),
-        0x0000000b,
+        connection_id,
         scramble_1,
         Some(scramble_2),
-        capabilities,
+        get_capabilities(),
         SERVER_LANGUAGE,
-        StatusFlags::SERVER_STATUS_AUTOCOMMIT,
-        AuthPlugin::MysqlNativePassword.as_bytes().into(),
+        get_server_status(),
+        AuthPlugin::CachingSha2Password.as_bytes().into(),
     );
 
     let mut src = BytesMut::new();
@@ -65,7 +71,7 @@ fn new_handshake_packet(scramble: &[u8; SCRAMBLE_BUFFER_SIZE]) -> BytesMut {
 async fn handle_handshake_response<'a>(
     src: &mut BytesMut,
     scramble: &[u8; SCRAMBLE_BUFFER_SIZE],
-) -> Result<BytesMut, Box<dyn std::error::Error>> {
+) -> Result<bool, Box<dyn std::error::Error>> {
     println!("resp::src: {:?}", src);
     println!("resp::src:vec: {:?}", src.to_vec());
 
@@ -73,7 +79,7 @@ async fn handle_handshake_response<'a>(
 
     println!("{:?}", resp);
 
-    let mut auth = false;
+    let mut valid_pass = false;
     let user = String::from_utf8_lossy(resp.user()).to_string();
     let empty_pass = if resp.scramble_buf().len() > 0 {
         "YES"
@@ -92,20 +98,12 @@ async fn handle_handshake_response<'a>(
                     mysql_common::packets::AuthPluginData::Native(p) => {
                         println!("local_passwd: {:?}", p);
                         println!("scramble_buf: {:?}", resp.scramble_buf());
-                        if p == resp.scramble_buf() {
-                            src.clear();
-                            src.extend_from_slice(PLAIN_OK);
-                            auth = true;
-                        }
+                        valid_pass = p == resp.scramble_buf();
                     }
                     mysql_common::packets::AuthPluginData::Sha2(p) => {
-                        println!("p: {:?}", p);
+                        println!("local_passwd: {:?}", p);
                         println!("scramble_buf: {:?}", resp.scramble_buf());
-                        if p == resp.scramble_buf() {
-                            src.clear();
-                            src.extend_from_slice(PLAIN_OK);
-                            auth = true;
-                        }
+                        valid_pass = p == resp.scramble_buf()
                     }
                     mysql_common::packets::AuthPluginData::Clear(_p) => {}
                     mysql_common::packets::AuthPluginData::Ed25519(_p) => {}
@@ -114,85 +112,73 @@ async fn handle_handshake_response<'a>(
         }
     }
 
-    if !auth {
-        src.clear();
-        // 错误包标志
-        src.put_u8(0xff);
-        // 错误代码 (1045 = 访问被拒绝)
-        src.extend_from_slice(&0x0415u16.to_le_bytes());
-        // SQL状态标志
-        src.put_u8(0x23); // '#'
-        src.extend_from_slice(b"28000"); // 访问被拒绝的SQL状态码
-        // 错误消息
-        src.extend_from_slice(
+    src.clear();
+    let mut buf: Vec<u8> = Vec::new();
+    if valid_pass {
+        OkPacket::new(
+            0,
+            0,
+            get_server_status(),
+            0,
+            String::new().as_bytes(),
+            String::new().as_bytes(),
+            get_capabilities(),
+        )
+        .serialize(&mut buf);
+    } else {
+        ErrPacket::Error(ServerError::new(
+            1045,
+            Some(SqlState::new(*b"28000")),
             format!(
                 "Access denied for user '{}'@'localhost' (using password: {})",
                 user, empty_pass
             )
             .as_bytes(),
-        );
+            get_capabilities(),
+        ))
+        .serialize(&mut buf);
     }
-
-    Ok(std::mem::take(src))
+    src.extend_from_slice(&buf);
+    Ok(valid_pass)
 }
 
-// 发送OK包
-// async fn send_ok_packet(
-//     stream: &mut TcpStream,
-//     packet_codec: &mut PacketCodec,
-// ) -> Result<(), Box<dyn std::error::Error>> {
-//     let mut packet = BytesMut::new();
+// 处理命令
+fn handle_command_response(src: &mut BytesMut) -> Result<(), Box<dyn std::error::Error>> {
+    let mut buf = ParseBuf(&src);
+    let command: RawInt<u8> = buf.parse(())?;
+    // println!("command: {:?}", *command);
+    println!("command: {:?}", Command::try_from(*command));
+    match Command::try_from(*command)? {
+        Command::COM_QUERY => {
+            if get_capabilities().contains(CapabilityFlags::CLIENT_QUERY_ATTRIBUTES) {
+                let _parameter_count: RawInt<LenEnc> = buf.parse(())?;
+                let _parameter_set_count: RawInt<LenEnc> = buf.parse(())?;
+                if *_parameter_count > 0 {
+                }
+            }
+            let query: RawBytes<EofBytes> = buf.parse(())?;
+            println!("query: {:?}", query);
+            // query.as_str()
+        }
+        _ => {}
+    }
 
-//     // OK包标志
-//     packet.put_u8(0x00);
+    let mut buf: Vec<u8> = Vec::new();
+    OkPacket::new(
+            0,
+            0,
+            get_server_status(),
+            0,
+            String::new().as_bytes(),
+            String::new().as_bytes(),
+            get_capabilities(),
+        )
+        .serialize(&mut buf);
 
-//     // 受影响的行数 (0)
-//     packet.extend_from_slice(&[0x00]);
-
-//     // 最后插入的ID (0)
-//     packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
-
-//     // 服务器状态
-//     packet.extend_from_slice(&SERVER_STATUS.to_le_bytes());
-
-//     // 警告数 (0)
-//     packet.extend_from_slice(&[0x00, 0x00]);
-
-//     send_packet(stream, &mut packet, packet_codec).await?;
-//     Ok(())
-// }
-
-// // 发送错误包
-// async fn send_error_packet(
-//     stream: &mut TcpStream,
-//     message: &str,
-//     packet_codec: &mut PacketCodec,
-// ) -> Result<(), Box<dyn std::error::Error>> {
-//     let mut packet = BytesMut::new();
-//     // 错误包标志
-//     packet.put_u8(0xff);
-
-//     // 错误代码 (1045 = 访问被拒绝)
-//     packet.extend_from_slice(&0x0415u16.to_le_bytes());
-
-//     // SQL状态标志
-//     packet.put_u8(0x23); // '#'
-//     packet.extend_from_slice(b"28000"); // 访问被拒绝的SQL状态码
-
-//     // 错误消息
-//     packet.extend_from_slice(message.as_bytes());
-
-//     send_packet(stream, &mut packet, packet_codec).await?;
-//     Ok(())
-// }
-
-// // 握手响应数据结构
-// #[derive(Debug)]
-// struct HandshakeResponse {
-//     capabilities: u32,
-//     username: String,
-//     auth_response: Vec<u8>,
-// }
+    src.clear();
+    src.extend_from_slice(&buf);
+    Ok(())
+}
 
 enum ServerPhaseDesc {
     InitialHandshakePacket,
@@ -203,17 +189,18 @@ enum ServerPhaseDesc {
     AuthenticationMethodSwitch,
     #[allow(unused)]
     AuthenticationExchangeContinuation,
+    Command,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:8080").await?;
     println!("MySQL Server listen to 127.0.0.1:8080...");
-    // let user_db = UserDB::new();
+    let connection_id = Arc::new(Mutex::new(10));
 
     loop {
         let (mut socket, _) = listener.accept().await?;
-        // let cloned_user_db = user_db.clone();
+        let cloned_connection_id: Arc<Mutex<u32>> = Arc::clone(&connection_id);
 
         tokio::spawn(async move {
             let mut scramble = [0u8; SCRAMBLE_BUFFER_SIZE];
@@ -228,8 +215,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         #[allow(deprecated)]
                         rand::Rng::fill(&mut rand::thread_rng(), &mut scramble);
 
+                        let mut current_conn_id = cloned_connection_id.try_lock().unwrap();
+                        *current_conn_id += 1;
+
                         // 2. 发送初始握手包
-                        buffer = new_handshake_packet(&scramble);
+                        buffer = new_handshake_packet(&scramble, *current_conn_id);
                         println!("buffer.len: {:?}", buffer.len());
 
                         // 3 发送挑战包给客户端
@@ -242,11 +232,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // 4. 接收客户端响应
                         let mut buf = [0; READ_BUFFER_SIZE];
                         let n = match socket.read(&mut buf).await {
-                            Ok(0) => return,
+                            Ok(0) => {
+                                println!("Socket closed");
+                                break;
+                            }
                             Ok(n) => n,
                             Err(e) => {
-                                eprintln!("failed to read from socket; err = {:?}", e);
-                                return;
+                                println!("failed to read from socket; err = {:?}", e);
+                                break;
                             }
                         };
 
@@ -257,11 +250,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let mut src = BytesMut::new();
                         src.extend_from_slice(data);
                         println!("recv:buffer:src:{:?}", src);
-                        // !!!!!!! decode后buffer没有数据，且没有报错，待查
                         packet_codec.decode(&mut src, &mut buffer).unwrap();
-                        // 临时用切片的方式，因为还要用packet_codec.seq_id
-                        // buffer.clear();
-                        // buffer.extend_from_slice(&data[4..]);
 
                         println!("recv:buffer:{:?}", buffer);
                         println!("recv:buffer:vec:{:?}", buffer.to_vec());
@@ -269,16 +258,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         match next_status {
                             // 5. 解析握手包
                             ServerPhaseDesc::ClientHandshakeResponse => {
-                                buffer =
+                                let valid_pass =
                                     match handle_handshake_response(&mut buffer, &scramble).await {
                                         Ok(buf) => buf,
                                         Err(e) => {
                                             println!("{e}");
-                                            return;
+                                            break;
                                         }
                                     };
 
                                 // 6.验证客户端身份后响应给客户端
+                                status = ServerPhaseDesc::ServerResponse;
+                                // 7. 登录成功，切换至命令阶段
+                                if valid_pass {
+                                    next_status = ServerPhaseDesc::Command;
+                                }
+                            }
+                            ServerPhaseDesc::Command => {
+                                // 7. 登录成功，切换至命令阶段
+                                println!("Command: {:?}", buffer);
+                                if let Err(e) = handle_command_response(&mut buffer) {
+                                    println!("{e}");
+                                    break;
+                                }
+                                // 8.处理命令后响应给客户端
                                 status = ServerPhaseDesc::ServerResponse;
                             }
                             _ => {}
@@ -312,19 +315,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     _ => {}
                 }
-                // 4. 验证客户端身份
-                // if verify_credentials(&cloned_user_db, &response, &scramble).unwrap() {
-                //     println!("用户认证成功: {}", response.username);
-                //     // 发送认证成功包
-                //     send_ok_packet(&mut socket).await.unwrap();
-                //     println!("已发送认证成功响应，等待从库同步请求");
-                // } else {
-                //     println!("用户认证失败: {}", response.username);
-                //     // 发送认证失败包
-                //     send_error_packet(&mut socket, "Access denied for user")
-                //         .await
-                //         .unwrap();
-                // }
             }
         });
     }
@@ -339,7 +329,7 @@ mod tests {
         consts::{CapabilityFlags, StatusFlags},
     };
     use mysql_common::{
-        packets::HandshakePacket,
+        packets::{AuthPlugin, HandshakePacket},
         proto::{MySerialize, codec::PacketCodec},
     };
 
@@ -386,14 +376,6 @@ mod tests {
 
     #[test]
     fn test_parse_handshake_packet() {
-        let data = [
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        ];
-
-        let raw_bytes = [
-            141, 166, 255, 25, 0, 0, 0, 1, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 114, 111, 111, 116, 0, 0, 99, 97, 99, 104, 105, 110, 103, 95, 115,
-            104, 97, 50, 95, 112, 97, 115, 115, 119, 111, 114, 100, 0,
-        ];
+        // AuthPlugin::CachingSha2Password.gen_data(Some("123456"), nonce)
     }
 }

@@ -511,69 +511,96 @@ fn deserialize_connect_attrs<'de>(
 }
 
 /// Represents MySql's Ok packet.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct OkPacket<'a> {
-    affected_rows: u64,
-    last_insert_id: Option<u64>,
-    status_flags: StatusFlags,
-    warnings: u16,
-    info: Option<RawBytes<'a, LenEnc>>,
-    session_state_info: Option<RawBytes<'a, LenEnc>>,
-}
+// #[derive(Debug, Clone, Eq, PartialEq)]
+// pub struct OkPacket<'a> {
+//     affected_rows: u64,
+//     last_insert_id: Option<u64>,
+//     status_flags: StatusFlags,
+//     warnings: u16,
+//     info: Option<RawBytes<'a, LenEnc>>,
+//     session_state_info: Option<RawBytes<'a, LenEnc>>,
+// }
 
-#[allow(unused)]
-impl OkPacket<'_> {
-    pub fn new(
-        affected_rows: u64,
-        last_insert_id: Option<u64>,
-        status_flags: StatusFlags,
-        warnings: u16,
-    ) -> Self {
-        OkPacket {
-            affected_rows,
-            last_insert_id,
-            status_flags,
-            warnings,
-            info: None,
-            session_state_info: None,
-        }
-    }
+// #[allow(unused)]
+// impl OkPacket<'_> {
+//     pub fn new(
+//         affected_rows: u64,
+//         last_insert_id: Option<u64>,
+//         status_flags: StatusFlags,
+//         warnings: u16,
+//     ) -> Self {
+//         OkPacket {
+//             affected_rows,
+//             last_insert_id,
+//             status_flags,
+//             warnings,
+//             info: None,
+//             session_state_info: None,
+//         }
+//     }
 
-    pub fn into_owned(self) -> OkPacket<'static> {
-        OkPacket {
-            affected_rows: self.affected_rows,
-            last_insert_id: self.last_insert_id,
-            status_flags: self.status_flags,
-            warnings: self.warnings,
-            info: self.info.map(|x| x.into_owned()),
-            session_state_info: self.session_state_info.map(|x| x.into_owned()),
-        }
-    }
+//     pub fn into_owned(self) -> OkPacket<'static> {
+//         OkPacket {
+//             affected_rows: self.affected_rows,
+//             last_insert_id: self.last_insert_id,
+//             status_flags: self.status_flags,
+//             warnings: self.warnings,
+//             info: self.info.map(|x| x.into_owned()),
+//             session_state_info: self.session_state_info.map(|x| x.into_owned()),
+//         }
+//     }
 
-    /// Value of the affected_rows field of an Ok packet.
-    pub fn affected_rows(&self) -> u64 {
-        self.affected_rows
-    }
+//     /// Value of the affected_rows field of an Ok packet.
+//     pub fn affected_rows(&self) -> u64 {
+//         self.affected_rows
+//     }
 
-    /// Value of the last_insert_id field of an Ok packet.
-    pub fn last_insert_id(&self) -> Option<u64> {
-        self.last_insert_id
-    }
+//     /// Value of the last_insert_id field of an Ok packet.
+//     pub fn last_insert_id(&self) -> Option<u64> {
+//         self.last_insert_id
+//     }
 
-    /// Value of the status_flags field of an Ok packet.
-    pub fn status_flags(&self) -> StatusFlags {
-        self.status_flags
-    }
+//     /// Value of the status_flags field of an Ok packet.
+//     pub fn status_flags(&self) -> StatusFlags {
+//         self.status_flags
+//     }
 
-    /// Value of the warnings field of an Ok packet.
-    pub fn warnings(&self) -> u16 {
-        self.warnings
-    }
-}
+//     /// Value of the warnings field of an Ok packet.
+//     pub fn warnings(&self) -> u16 {
+//         self.warnings
+//     }
+// }
+
+// impl<'a> TryFrom<OkPacketBody<'a>> for OkPacket<'a> {
+//     type Error = io::Error;
+
+//     fn try_from(body: OkPacketBody<'a>) -> io::Result<Self> {
+//         Ok(OkPacket {
+//             affected_rows: *body.affected_rows,
+//             last_insert_id: if *body.last_insert_id == 0 {
+//                 None
+//             } else {
+//                 Some(*body.last_insert_id)
+//             },
+//             status_flags: *body.status_flags,
+//             warnings: *body.warnings,
+//             info: if !body.info.is_empty() {
+//                 Some(body.info)
+//             } else {
+//                 None
+//             },
+//             session_state_info: if !body.session_state_info.is_empty() {
+//                 Some(body.session_state_info)
+//             } else {
+//                 None
+//             },
+//         })
+//     }
+// }
 
 /// Represents MySql's Ok packet.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct OkPacketBody<'a> {
+pub struct OkPacket<'a> {
     affected_rows: RawInt<LenEnc>,
     last_insert_id: RawInt<LenEnc>,
     status_flags: Const<StatusFlags, LeU16>,
@@ -584,9 +611,11 @@ pub struct OkPacketBody<'a> {
     capabilities: CapabilityFlags,
 }
 
+// OK: header = 0 and length of packet >= 7
+// EOF: header = 0xfe and length of packet < 8
 #[allow(unused)]
-impl<'a> OkPacketBody<'a> {
-    const HEADER: u8 = 0xFE;
+impl<'a> OkPacket<'a> {
+    const HEADER: u8 = 0x00;
     pub fn new(
         affected_rows: u64,
         last_insert_id: u64,
@@ -596,7 +625,7 @@ impl<'a> OkPacketBody<'a> {
         session_state_info: impl Into<Cow<'a, [u8]>>,
         capabilities: CapabilityFlags,
     ) -> Self {
-        OkPacketBody {
+        OkPacket {
             affected_rows: RawInt::new(affected_rows),
             last_insert_id: RawInt::new(last_insert_id),
             status_flags: Const::new(status_flags),
@@ -610,9 +639,9 @@ impl<'a> OkPacketBody<'a> {
 }
 
 // sql/protocol_classics.cc `net_send_ok`
-impl<'a> MySerialize for OkPacketBody<'a> {
+impl<'a> MySerialize for OkPacket<'a> {
     fn serialize(&self, buf: &mut Vec<u8>) {
-        buf.put_u8(OkPacketBody::HEADER);
+        buf.put_u8(OkPacket::HEADER);
         self.affected_rows.serialize(buf);
         self.last_insert_id.serialize(buf);
 
@@ -754,19 +783,9 @@ impl<'a> ServerError<'a> {
 
 impl MySerialize for ServerError<'_> {
     fn serialize(&self, buf: &mut Vec<u8>) {
-        buf.put_u8(ServerError::HEADER);
-
-        self.code.serialize(buf);
-
-        if self
-            .capabilities
-            .contains(CapabilityFlags::CLIENT_PROTOCOL_41)
-        {
-            if let Some(state) = &self.state {
-                state.serialize(buf);
-            }
+        if let Some(state) = &self.state {
+            state.serialize(buf);
         }
-
         self.message.serialize(buf);
     }
 }
