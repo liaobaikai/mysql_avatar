@@ -1,24 +1,15 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Result, anyhow};
 use bytes::{Buf, BytesMut};
 use mysql_async::consts::{CapabilityFlags, StatusFlags};
 use mysql_common::{
     io::ParseBuf,
-    misc::raw::{
-        RawBytes, RawInt,
-        bytes::EofBytes,
-        int::{LeU16, LenEnc},
-    },
+    misc::raw::{RawBytes, RawInt, bytes::EofBytes},
     packets::{AuthPlugin, SqlState},
     proto::{MyDeserialize, MySerialize, codec::PacketCodec},
 };
 
-use sqlparser::{
-    ast::{SelectItem, SetExpr, Statement},
-    dialect::{self, MySqlDialect},
-    parser::Parser,
-};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -26,10 +17,12 @@ use tokio::{
 };
 
 use crate::{
+    command::{SYSVARS, handle_command_query},
     constants::Command,
     packets::{ErrPacket, HandshakePacket, HandshakeResponse, OkPacket, ServerError},
 };
 // mod codec;
+mod command;
 mod constants;
 mod packets;
 
@@ -166,6 +159,7 @@ async fn handle_handshake_response<'a>(
 fn handle_command_response(
     src: &mut BytesMut,
     _client_capabilities: &CapabilityFlags,
+    session_vars: &mut HashMap<String, String>,
 ) -> Result<()> {
     let mut buf = ParseBuf(&src);
     let command: RawInt<u8> = buf.parse(())?;
@@ -173,44 +167,10 @@ fn handle_command_response(
     println!("command: {:?}", Command::try_from(*command));
     match Command::try_from(*command)? {
         Command::COM_QUERY => {
-            // if get_capabilities().contains(CapabilityFlags::CLIENT_QUERY_ATTRIBUTES) {
-            //     let _parameter_count: RawInt<LenEnc> = buf.parse(())?;
-            //     let _parameter_set_count: RawInt<LenEnc> = buf.parse(())?;
-            //     if *_parameter_count > 0 {
-            //         // let _null_bitmap:
-            //         let _new_params_bind_flag: RawInt<u8> = buf.parse(())?;
-            //         if *_new_params_bind_flag > 0 {
-            //             let _param_type_and_flag: RawInt<LeU16> = buf.parse(())?;
-            //             let _parameter_name: RawBytes<LenEnc> = buf.parse(())?;
-            //         }
-            //     }
-            // }
             let query: RawBytes<EofBytes> = buf.parse(())?;
-            // println!("query: {:?}", query.as_str());
-            let sql = query.as_str();
-            // 解析树
-            let dialect = MySqlDialect {};
-            for stmt in Parser::parse_sql(&dialect, &sql)? {
-                match stmt {
-                    Statement::Query(q) => match *q.body {
-                        SetExpr::Select(data) => {
-                            println!("data: {:?}", data);
-                            println!("projection: {:?}", data.projection);
-                            for proj in data.projection {
-                                match proj {
-                                    SelectItem::UnnamedExpr(exp) => {
-                                        println!("exp: {:?}", exp);
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        _ => {}
-                    },
-                    _ => {}
-                }
-            }
-            // query.as_str()
+            let buf = handle_command_query(&query.as_str(), session_vars)?;
+            src.clear();
+            src.extend_from_slice(&buf);
         }
         Command::COM_QUIT => {
             // Closed
@@ -253,7 +213,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind("127.0.0.1:8080").await?;
     println!("MySQL Server listen to 127.0.0.1:8080...");
     let connection_id = Arc::new(Mutex::new(10));
-
     loop {
         let (mut socket, _) = listener.accept().await?;
         let cloned_connection_id: Arc<Mutex<u32>> = Arc::clone(&connection_id);
@@ -265,6 +224,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut packet_codec = PacketCodec::default();
             let mut buffer = BytesMut::new();
             let mut client_capabilities = CapabilityFlags::empty();
+
+            let mut session_vars: HashMap<String, String> = HashMap::new();
+            for (k, v) in SYSVARS.iter() {
+                let newkey = k.trim_start_matches("@@global.");
+                session_vars.insert(format!("@@session.{newkey}"), v.to_string());
+                session_vars.insert(format!("@@{newkey}"), v.to_string());
+            }
+
             loop {
                 match status {
                     ServerPhaseDesc::InitialHandshakePacket => {
@@ -339,9 +306,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ServerPhaseDesc::Command => {
                                 // 7. 登录成功，切换至命令阶段
                                 println!("Command: {:?}", buffer);
-                                if let Err(e) =
-                                    handle_command_response(&mut buffer, &client_capabilities)
-                                {
+                                if let Err(e) = handle_command_response(
+                                    &mut buffer,
+                                    &client_capabilities,
+                                    &mut session_vars,
+                                ) {
                                     println!("{e}");
                                     break;
                                 }
