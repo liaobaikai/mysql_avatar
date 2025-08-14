@@ -1,21 +1,37 @@
 use std::sync::Arc;
 
+use anyhow::{Result, anyhow};
 use bytes::{Buf, BytesMut};
 use mysql_async::consts::{CapabilityFlags, StatusFlags};
 use mysql_common::{
-    io::ParseBuf, misc::raw::{bytes::{EofBytes}, int::LenEnc, RawBytes, RawInt}, packets::{AuthPlugin, SqlState}, proto::{codec::PacketCodec, MyDeserialize, MySerialize}
+    io::ParseBuf,
+    misc::raw::{
+        RawBytes, RawInt,
+        bytes::EofBytes,
+        int::{LeU16, LenEnc},
+    },
+    packets::{AuthPlugin, SqlState},
+    proto::{MyDeserialize, MySerialize, codec::PacketCodec},
 };
 
+use sqlparser::{
+    ast::{SelectItem, SetExpr, Statement},
+    dialect::{self, MySqlDialect},
+    parser::Parser,
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
     sync::Mutex,
 };
 
-use crate::{constants::Command, packets::{ErrPacket, HandshakePacket, HandshakeResponse, OkPacket, ServerError}};
+use crate::{
+    constants::Command,
+    packets::{ErrPacket, HandshakePacket, HandshakeResponse, OkPacket, ServerError},
+};
 // mod codec;
-mod packets;
 mod constants;
+mod packets;
 
 const SCRAMBLE_BUFFER_SIZE: usize = 20;
 const SERVER_VERSION: &str = "8.0.41";
@@ -34,6 +50,7 @@ fn get_capabilities() -> CapabilityFlags {
         | CapabilityFlags::CLIENT_CONNECT_WITH_DB
         | CapabilityFlags::CLIENT_TRANSACTIONS
         | CapabilityFlags::CLIENT_CONNECT_ATTRS
+        // | CapabilityFlags::CLIENT_QUERY_ATTRIBUTES
         | CapabilityFlags::CLIENT_DEPRECATE_EOF
 }
 
@@ -71,7 +88,8 @@ fn new_handshake_packet(scramble: &[u8; SCRAMBLE_BUFFER_SIZE], connection_id: u3
 async fn handle_handshake_response<'a>(
     src: &mut BytesMut,
     scramble: &[u8; SCRAMBLE_BUFFER_SIZE],
-) -> Result<bool, Box<dyn std::error::Error>> {
+    client_capabilities: &mut CapabilityFlags,
+) -> Result<bool> {
     println!("resp::src: {:?}", src);
     println!("resp::src:vec: {:?}", src.to_vec());
 
@@ -86,6 +104,8 @@ async fn handle_handshake_response<'a>(
     } else {
         "NO"
     };
+
+    client_capabilities.insert(resp.capabilities());
 
     if resp
         .capabilities()
@@ -143,37 +163,73 @@ async fn handle_handshake_response<'a>(
 }
 
 // 处理命令
-fn handle_command_response(src: &mut BytesMut) -> Result<(), Box<dyn std::error::Error>> {
+fn handle_command_response(
+    src: &mut BytesMut,
+    _client_capabilities: &CapabilityFlags,
+) -> Result<()> {
     let mut buf = ParseBuf(&src);
     let command: RawInt<u8> = buf.parse(())?;
     // println!("command: {:?}", *command);
     println!("command: {:?}", Command::try_from(*command));
     match Command::try_from(*command)? {
         Command::COM_QUERY => {
-            if get_capabilities().contains(CapabilityFlags::CLIENT_QUERY_ATTRIBUTES) {
-                let _parameter_count: RawInt<LenEnc> = buf.parse(())?;
-                let _parameter_set_count: RawInt<LenEnc> = buf.parse(())?;
-                if *_parameter_count > 0 {
+            // if get_capabilities().contains(CapabilityFlags::CLIENT_QUERY_ATTRIBUTES) {
+            //     let _parameter_count: RawInt<LenEnc> = buf.parse(())?;
+            //     let _parameter_set_count: RawInt<LenEnc> = buf.parse(())?;
+            //     if *_parameter_count > 0 {
+            //         // let _null_bitmap:
+            //         let _new_params_bind_flag: RawInt<u8> = buf.parse(())?;
+            //         if *_new_params_bind_flag > 0 {
+            //             let _param_type_and_flag: RawInt<LeU16> = buf.parse(())?;
+            //             let _parameter_name: RawBytes<LenEnc> = buf.parse(())?;
+            //         }
+            //     }
+            // }
+            let query: RawBytes<EofBytes> = buf.parse(())?;
+            // println!("query: {:?}", query.as_str());
+            let sql = query.as_str();
+            // 解析树
+            let dialect = MySqlDialect {};
+            for stmt in Parser::parse_sql(&dialect, &sql)? {
+                match stmt {
+                    Statement::Query(q) => match *q.body {
+                        SetExpr::Select(data) => {
+                            println!("data: {:?}", data);
+                            println!("projection: {:?}", data.projection);
+                            for proj in data.projection {
+                                match proj {
+                                    SelectItem::UnnamedExpr(exp) => {
+                                        println!("exp: {:?}", exp);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
+                    _ => {}
                 }
             }
-            let query: RawBytes<EofBytes> = buf.parse(())?;
-            println!("query: {:?}", query);
             // query.as_str()
+        }
+        Command::COM_QUIT => {
+            // Closed
+            return Err(anyhow!("Connection closed"));
         }
         _ => {}
     }
 
     let mut buf: Vec<u8> = Vec::new();
     OkPacket::new(
-            0,
-            0,
-            get_server_status(),
-            0,
-            String::new().as_bytes(),
-            String::new().as_bytes(),
-            get_capabilities(),
-        )
-        .serialize(&mut buf);
+        0,
+        0,
+        get_server_status(),
+        0,
+        String::new().as_bytes(),
+        String::new().as_bytes(),
+        get_capabilities(),
+    )
+    .serialize(&mut buf);
 
     src.clear();
     src.extend_from_slice(&buf);
@@ -208,6 +264,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut next_status = ServerPhaseDesc::InitialHandshakePacket;
             let mut packet_codec = PacketCodec::default();
             let mut buffer = BytesMut::new();
+            let mut client_capabilities = CapabilityFlags::empty();
             loop {
                 match status {
                     ServerPhaseDesc::InitialHandshakePacket => {
@@ -258,14 +315,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         match next_status {
                             // 5. 解析握手包
                             ServerPhaseDesc::ClientHandshakeResponse => {
-                                let valid_pass =
-                                    match handle_handshake_response(&mut buffer, &scramble).await {
-                                        Ok(buf) => buf,
-                                        Err(e) => {
-                                            println!("{e}");
-                                            break;
-                                        }
-                                    };
+                                let valid_pass = match handle_handshake_response(
+                                    &mut buffer,
+                                    &scramble,
+                                    &mut client_capabilities,
+                                )
+                                .await
+                                {
+                                    Ok(buf) => buf,
+                                    Err(e) => {
+                                        println!("{e}");
+                                        break;
+                                    }
+                                };
 
                                 // 6.验证客户端身份后响应给客户端
                                 status = ServerPhaseDesc::ServerResponse;
@@ -277,7 +339,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ServerPhaseDesc::Command => {
                                 // 7. 登录成功，切换至命令阶段
                                 println!("Command: {:?}", buffer);
-                                if let Err(e) = handle_command_response(&mut buffer) {
+                                if let Err(e) =
+                                    handle_command_response(&mut buffer, &client_capabilities)
+                                {
                                     println!("{e}");
                                     break;
                                 }
