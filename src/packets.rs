@@ -598,6 +598,41 @@ fn deserialize_connect_attrs<'de>(
 //     }
 // }
 
+/// Represents MySql's EOF packet.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct EofPacket {
+    status_flags: Const<StatusFlags, LeU16>,
+    warnings: RawInt<LeU16>,
+
+    capabilities: CapabilityFlags,
+}
+
+#[allow(unused)]
+impl EofPacket {
+    const HEADER: u8 = 0xfe;
+    pub fn new(status_flags: StatusFlags, warnings: u16, capabilities: CapabilityFlags) -> Self {
+        Self {
+            status_flags: Const::new(status_flags),
+            warnings: RawInt::new(warnings),
+            capabilities,
+        }
+    }
+}
+
+impl<'a> MySerialize for EofPacket {
+    fn serialize(&self, buf: &mut Vec<u8>) {
+        buf.put_u8(EofPacket::HEADER);
+
+        if self
+            .capabilities
+            .contains(CapabilityFlags::CLIENT_PROTOCOL_41)
+        {
+            self.warnings.serialize(buf);
+            self.status_flags.serialize(buf);
+        }
+    }
+}
+
 /// Represents MySql's Ok packet.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct OkPacket<'a> {
@@ -625,7 +660,7 @@ impl<'a> OkPacket<'a> {
         session_state_info: impl Into<Cow<'a, [u8]>>,
         capabilities: CapabilityFlags,
     ) -> Self {
-        OkPacket {
+        Self {
             affected_rows: RawInt::new(affected_rows),
             last_insert_id: RawInt::new(last_insert_id),
             status_flags: Const::new(status_flags),
@@ -642,6 +677,86 @@ impl<'a> OkPacket<'a> {
 impl<'a> MySerialize for OkPacket<'a> {
     fn serialize(&self, buf: &mut Vec<u8>) {
         buf.put_u8(OkPacket::HEADER);
+        self.affected_rows.serialize(buf);
+        self.last_insert_id.serialize(buf);
+
+        if self
+            .capabilities
+            .contains(CapabilityFlags::CLIENT_PROTOCOL_41)
+        {
+            self.status_flags.serialize(buf);
+            self.warnings.serialize(buf);
+        } else if self
+            .capabilities
+            .contains(CapabilityFlags::CLIENT_TRANSACTIONS)
+        {
+            self.status_flags.serialize(buf);
+        }
+
+        if self
+            .capabilities
+            .contains(CapabilityFlags::CLIENT_SESSION_TRACK)
+        {
+            if self
+                .status_flags
+                .contains(StatusFlags::SERVER_SESSION_STATE_CHANGED)
+            {
+                self.info.serialize(buf);
+            } else {
+                self.session_state_info.serialize(buf);
+            }
+        } else {
+            self.info.serialize(buf);
+        }
+    }
+}
+
+
+/// Represents MySql's Ok packet.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct OkPacket2<'a> {
+    affected_rows: RawInt<LenEnc>,
+    last_insert_id: RawInt<LenEnc>,
+    status_flags: Const<StatusFlags, LeU16>,
+    warnings: RawInt<LeU16>,
+    info: RawBytes<'a, LenEnc>,
+    session_state_info: RawBytes<'a, LenEnc>,
+
+    capabilities: CapabilityFlags,
+}
+
+
+// OK: header = 0 and length of packet >= 7
+// EOF: header = 0xfe and length of packet < 8
+#[allow(unused)]
+impl<'a> OkPacket2<'a> {
+    const HEADER: u8 = 0xFE;
+    pub fn new(
+        affected_rows: u64,
+        last_insert_id: u64,
+        status_flags: StatusFlags,
+        warnings: u16,
+        info: impl Into<Cow<'a, [u8]>>,
+        session_state_info: impl Into<Cow<'a, [u8]>>,
+        capabilities: CapabilityFlags,
+    ) -> Self {
+        Self {
+            affected_rows: RawInt::new(affected_rows),
+            last_insert_id: RawInt::new(last_insert_id),
+            status_flags: Const::new(status_flags),
+            warnings: RawInt::new(warnings),
+            info: RawBytes::new(info.into()),
+            session_state_info: RawBytes::new(session_state_info.into()),
+
+            capabilities,
+        }
+    }
+}
+
+// sql/protocol_classics.cc `net_send_ok`
+impl<'a> MySerialize for OkPacket2<'a> {
+    fn serialize(&self, buf: &mut Vec<u8>) {
+        buf.put_u8(OkPacket2::HEADER);
         self.affected_rows.serialize(buf);
         self.last_insert_id.serialize(buf);
 
@@ -787,5 +902,192 @@ impl MySerialize for ServerError<'_> {
             state.serialize(buf);
         }
         self.message.serialize(buf);
+    }
+}
+
+// 100, 101, 102,  --catalog
+// 0, --schema
+// 0, --table
+// 0, --org_table
+// 9, --name
+// 64, 64, 108, 111, 103, 95, 98, 105, 110, 0, --org_name:  @@bin_log
+// 12,   --length of fixed length fields
+// 63, 0, --character_set: binary
+// 1,  0, 0, 0, --column_length
+// 8,  --type
+// 128, 0, --flags
+// 0, --decimals
+// 0, 0, --reserved
+// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_com_query_response_text_resultset_column_definition.html
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
+pub struct ColumnDefinition<'a> {
+    catalog: RawBytes<'a, LenEnc>,
+    schema: RawBytes<'a, LenEnc>,
+    table: RawBytes<'a, LenEnc>,
+    org_table: RawBytes<'a, LenEnc>,
+    name: RawBytes<'a, LenEnc>,
+    org_name: RawBytes<'a, LenEnc>,
+    // 0x0c
+    __fixed: RawInt<LenEnc>,
+    character_set: RawInt<LeU16>,
+    column_length: RawInt<LeU32>,
+
+    data_type: RawInt<u8>,
+    flags: RawInt<LeU16>,
+    decimals: RawInt<u8>,
+    // reserved for future use.
+    __reserved: Skip<2>,
+}
+
+impl<'a> ColumnDefinition<'a> {
+    pub fn new(
+        schema: impl Into<Cow<'a, [u8]>>,
+        table: impl Into<Cow<'a, [u8]>>,
+        org_table: impl Into<Cow<'a, [u8]>>,
+        name: impl Into<Cow<'a, [u8]>>,
+        org_name: impl Into<Cow<'a, [u8]>>,
+        character_set: u16,
+        column_length: u32,
+        data_type: u8,
+        flags: u16,
+        decimals: u8,
+    ) -> Self {
+        ColumnDefinition {
+            catalog: RawBytes::new("def".as_bytes()),
+            schema: RawBytes::new(schema),
+            table: RawBytes::new(table),
+            org_table: RawBytes::new(org_table),
+            name: RawBytes::new(name),
+            org_name: RawBytes::new(org_name),
+
+            __fixed: RawInt::new(0x0c),
+            character_set: RawInt::new(character_set),
+            column_length: RawInt::new(column_length),
+            data_type: RawInt::new(data_type),
+            flags: RawInt::new(flags),
+            decimals: RawInt::new(decimals),
+
+            __reserved: Skip,
+        }
+    }
+}
+
+impl MySerialize for ColumnDefinition<'_> {
+    fn serialize(&self, buf: &mut Vec<u8>) {
+        self.catalog.serialize(&mut *buf);
+        self.schema.serialize(&mut *buf);
+        self.table.serialize(&mut *buf);
+        self.org_table.serialize(&mut *buf);
+        self.name.serialize(&mut *buf);
+        self.org_name.serialize(&mut *buf);
+        // 0x0C
+        self.__fixed.serialize(&mut *buf);
+        //
+        self.character_set.serialize(&mut *buf);
+        self.column_length.serialize(&mut *buf);
+        self.data_type.serialize(&mut *buf);
+        self.flags.serialize(&mut *buf);
+        self.decimals.serialize(&mut *buf);
+        // 0 0
+        self.__reserved.serialize(&mut *buf);
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct TextResultsetRow<'a> {
+    _column_count: RawInt<LenEnc>,
+    data: Option<Vec<RawBytes<'a, LenEnc>>>,
+}
+
+impl<'a> TextResultsetRow<'a> {
+    pub fn new(data: Option<Vec<impl Into<Cow<'a, [u8]>>>>) -> Self {
+        let data = if let Some(data_) = data {
+            let mut values = Vec::new();
+            for value in data_ {
+                values.push(RawBytes::new(value));
+            }
+            // values.push(RawBytes::new(0xFB));
+            Some(values)
+        } else {
+            None
+        };
+        Self {
+            _column_count: RawInt::new(0),
+            data,
+        }
+    }
+}
+
+impl MySerialize for TextResultsetRow<'_> {
+    fn serialize(&self, buf: &mut Vec<u8>) {
+        // self.column_count.serialize(&mut *buf);
+        match self.data.clone() {
+            Some(data_) => {
+                for value in data_ {
+                    value.serialize(&mut *buf);
+                }
+            }
+            None => {
+                // for _ in 0..*self.column_count {
+                //     buf.push(0xFB);
+                // }
+                buf.push(0xFB);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mysql_common::proto::MySerialize;
+
+    use crate::{
+        constants::ColumnDefinitionFlags,
+        get_capabilities, get_server_status,
+        packets::{ColumnDefinition, OkPacket, TextResultsetRow},
+    };
+
+    #[test]
+    fn test_build_column_definition() {
+        // Packet1
+        let data = ColumnDefinition::new(
+            "".as_bytes(),
+            "".as_bytes(),
+            "".as_bytes(),
+            "@@log_bin".as_bytes(),
+            "".as_bytes(),
+            63, // binary
+            1,  //
+            8,  // binary
+            ColumnDefinitionFlags::BINARY_FLAG as u16,
+            0x00,
+        );
+
+        let mut buffer = Vec::new();
+        data.serialize(&mut buffer);
+        println!("buffer: {:?}", buffer);
+
+        // Packet2
+
+        let data = TextResultsetRow::new(Some(["1".as_bytes()].to_vec()));
+        // println!("data: {:?}", data);
+        let mut buffer = Vec::new();
+        data.serialize(&mut buffer);
+        println!("buffer: {:?}", buffer);
+
+        // Packet3
+        let mut buffer = Vec::new();
+        OkPacket::new(
+            0,
+            0,
+            get_server_status(),
+            0,
+            String::new().as_bytes(),
+            String::new().as_bytes(),
+            get_capabilities(),
+        )
+        .serialize(&mut buffer);
+
+        println!("buffer: {:?}", buffer);
     }
 }

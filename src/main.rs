@@ -17,14 +17,15 @@ use tokio::{
 };
 
 use crate::{
-    command::{SYSVARS, handle_command_query},
+    command::handle_command_query,
     constants::Command,
-    packets::{ErrPacket, HandshakePacket, HandshakeResponse, OkPacket, ServerError},
+    packets::{ErrPacket, HandshakePacket, HandshakeResponse, OkPacket, ServerError}, vars::{Variable, SYSVARS},
 };
 // mod codec;
 mod command;
 mod constants;
 mod packets;
+mod vars;
 
 const SCRAMBLE_BUFFER_SIZE: usize = 20;
 const SERVER_VERSION: &str = "8.0.41";
@@ -159,8 +160,8 @@ async fn handle_handshake_response<'a>(
 fn handle_command_response(
     src: &mut BytesMut,
     _client_capabilities: &CapabilityFlags,
-    session_vars: &mut HashMap<String, String>,
-) -> Result<()> {
+    session_vars: &mut Vec<Variable>,
+) -> Result<Vec<BytesMut>> {
     let mut buf = ParseBuf(&src);
     let command: RawInt<u8> = buf.parse(())?;
     // println!("command: {:?}", *command);
@@ -168,10 +169,8 @@ fn handle_command_response(
     match Command::try_from(*command)? {
         Command::COM_QUERY => {
             let query: RawBytes<EofBytes> = buf.parse(())?;
-            let buf = handle_command_query(&query.as_str(), session_vars)?;
-            src.clear();
-            src.extend_from_slice(&buf);
-            return Ok(());
+            let ret = handle_command_query(&query.as_str(), session_vars)?;
+            return Ok(ret);
         }
         Command::COM_QUIT => {
             // Closed
@@ -194,7 +193,7 @@ fn handle_command_response(
 
     src.clear();
     src.extend_from_slice(&buf);
-    Ok(())
+    Ok(vec![std::mem::take(src)])
 }
 
 enum ServerPhaseDesc {
@@ -223,14 +222,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut status = ServerPhaseDesc::InitialHandshakePacket;
             let mut next_status = ServerPhaseDesc::InitialHandshakePacket;
             let mut packet_codec = PacketCodec::default();
-            let mut buffer = BytesMut::new();
+            let mut buffers: Vec<BytesMut> = Vec::new();
+            let mut common_buffer = BytesMut::new();
             let mut client_capabilities = CapabilityFlags::empty();
 
-            let mut session_vars: HashMap<String, String> = HashMap::new();
-            for (k, v) in SYSVARS.iter() {
-                let newkey = k.trim_start_matches("@@global.");
-                session_vars.insert(format!("@@session.{newkey}"), v.to_string());
-                session_vars.insert(format!("@@{newkey}"), v.to_string());
+            let mut session_vars: Vec<Variable> = Vec::new();
+            for var in SYSVARS.iter() {
+                session_vars.push(var.clone());
             }
 
             loop {
@@ -244,8 +242,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         *current_conn_id += 1;
 
                         // 2. 发送初始握手包
-                        buffer = new_handshake_packet(&scramble, *current_conn_id);
-                        println!("buffer.len: {:?}", buffer.len());
+                        common_buffer = new_handshake_packet(&scramble, *current_conn_id);
+                        println!("buffer.len: {:?}", common_buffer.len());
 
                         // 3 发送挑战包给客户端
                         status = ServerPhaseDesc::ServerResponse;
@@ -271,20 +269,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let data = &buf[0..n];
                         println!("recv:buf:{:?}", data);
 
-                        buffer.clear();
+                        common_buffer.clear();
                         let mut src = BytesMut::new();
                         src.extend_from_slice(data);
                         println!("recv:buffer:src:{:?}", src);
-                        packet_codec.decode(&mut src, &mut buffer).unwrap();
+                        packet_codec.decode(&mut src, &mut common_buffer).unwrap();
 
-                        println!("recv:buffer:{:?}", buffer);
-                        println!("recv:buffer:vec:{:?}", buffer.to_vec());
+                        println!("recv:buffer:{:?}", common_buffer);
+                        println!("recv:buffer:vec:{:?}", common_buffer.to_vec());
 
                         match next_status {
                             // 5. 解析握手包
                             ServerPhaseDesc::ClientHandshakeResponse => {
                                 let valid_pass = match handle_handshake_response(
-                                    &mut buffer,
+                                    &mut common_buffer,
                                     &scramble,
                                     &mut client_capabilities,
                                 )
@@ -306,15 +304,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             ServerPhaseDesc::Command => {
                                 // 7. 登录成功，切换至命令阶段
-                                println!("Command: {:?}", buffer);
-                                if let Err(e) = handle_command_response(
-                                    &mut buffer,
+                                println!("Command: {:?}", common_buffer);
+                                let mut ret = match handle_command_response(
+                                    &mut common_buffer,
                                     &client_capabilities,
                                     &mut session_vars,
                                 ) {
-                                    println!("{e}");
-                                    break;
-                                }
+                                    Ok(ret) => ret,
+                                    Err(e) => {
+                                        println!("{e}");
+                                        break;
+                                    }
+                                };
+                                common_buffer.clear();
+                                buffers.append(&mut ret);
+
                                 // 8.处理命令后响应给客户端
                                 status = ServerPhaseDesc::ServerResponse;
                             }
@@ -326,21 +330,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // 3 发送挑战包给客户端
                         // 6.验证客户端身份后响应给客户端
                         // Write the data back
-                        if buffer.has_remaining() {
-                            let mut src = BytesMut::new();
-                            src.extend_from_slice(&buffer);
+                        if common_buffer.has_remaining() {
+                            let mut src = common_buffer.clone();
+                            common_buffer.clear();
+                            packet_codec.encode(&mut src, &mut common_buffer).unwrap();
 
-                            buffer.clear();
-                            packet_codec.encode(&mut src, &mut buffer).unwrap();
-
-                            println!("ServerResponse:: buffer:: {:?}", buffer);
-                            println!(">>>>ServerResponse:: buffer:vec:: {:?}", buffer.to_vec());
-                            if let Err(e) = socket.write_all(&buffer).await {
+                            println!("ServerResponse:: buffer:: {:?}", common_buffer);
+                            println!(
+                                ">>>>ServerResponse:: buffer:vec:: {:?}",
+                                common_buffer.to_vec()
+                            );
+                            if let Err(e) = socket.write_all(&common_buffer).await {
                                 eprintln!("failed to write to socket; err = {:?}", e);
                                 return;
                             }
-                            buffer.clear();
+                            common_buffer.clear();
                             socket.flush().await.unwrap();
+                        } else {
+                            common_buffer.clear();
+                            loop {
+                                if buffers.len() == 0 {
+                                    break;
+                                }
+                                let mut src = buffers.remove(0);
+                                let mut dst = BytesMut::new();
+                                packet_codec.encode(&mut src, &mut dst).unwrap();
+                                common_buffer.extend_from_slice(&dst);
+
+                                println!("ServerResponse:: buffer:: {:?}", common_buffer);
+                                println!(
+                                    ">>>>ServerResponse:: buffer:vec:: {:?}",
+                                    common_buffer.to_vec()
+                                );
+                                if let Err(e) = socket.write_all(&common_buffer).await {
+                                    eprintln!("failed to write to socket; err = {:?}", e);
+                                    return;
+                                }
+                                common_buffer.clear();
+                                socket.flush().await.unwrap();
+                            }
                         }
 
                         // 等待客户端响应
