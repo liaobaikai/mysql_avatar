@@ -171,6 +171,7 @@ fn handle_command_response(
             let buf = handle_command_query(&query.as_str(), session_vars)?;
             src.clear();
             src.extend_from_slice(&buf);
+            return Ok(());
         }
         Command::COM_QUIT => {
             // Closed
@@ -408,7 +409,18 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_handshake_packet() {
-        // AuthPlugin::CachingSha2Password.gen_data(Some("123456"), nonce)
+    fn test_parse_handshake_packet() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // use mysql::prelude::*;
+        // use mysql::*;
+
+        // let url = "mysql://root:123456@gzdsg.baikai.top:4407/mysql";
+        // let pool = Pool::new(url)?;
+
+        // let mut conn = pool.get_conn()?;
+        // conn.query_drop(
+        //     r"select @@server_id",
+        // )?;
+
+        Ok(())
     }
 }
