@@ -1,6 +1,6 @@
 use std::{borrow::Cow, collections::HashMap, io};
 
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut};
 use mysql_async::consts::{CapabilityFlags, MariadbCapabilities, StatusFlags};
 use mysql_common::{
     collations::CollationId,
@@ -644,6 +644,7 @@ pub struct OkPacket<'a> {
     session_state_info: RawBytes<'a, LenEnc>,
 
     capabilities: CapabilityFlags,
+    is_eof: bool,
 }
 
 // OK: header = 0 and length of packet >= 7
@@ -659,6 +660,7 @@ impl<'a> OkPacket<'a> {
         info: impl Into<Cow<'a, [u8]>>,
         session_state_info: impl Into<Cow<'a, [u8]>>,
         capabilities: CapabilityFlags,
+        is_eof: bool,
     ) -> Self {
         Self {
             affected_rows: RawInt::new(affected_rows),
@@ -669,6 +671,7 @@ impl<'a> OkPacket<'a> {
             session_state_info: RawBytes::new(session_state_info.into()),
 
             capabilities,
+            is_eof,
         }
     }
 }
@@ -676,7 +679,12 @@ impl<'a> OkPacket<'a> {
 // sql/protocol_classics.cc `net_send_ok`
 impl<'a> MySerialize for OkPacket<'a> {
     fn serialize(&self, buf: &mut Vec<u8>) {
-        buf.put_u8(OkPacket::HEADER);
+        if self.is_eof {
+            buf.put_u8(0xFE);
+        } else {
+            buf.put_u8(0x00);
+        }
+
         self.affected_rows.serialize(buf);
         self.last_insert_id.serialize(buf);
 
@@ -711,83 +719,84 @@ impl<'a> MySerialize for OkPacket<'a> {
     }
 }
 
-/// Represents MySql's Ok packet.
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct OkPacket2<'a> {
-    affected_rows: RawInt<LenEnc>,
-    last_insert_id: RawInt<LenEnc>,
-    status_flags: Const<StatusFlags, LeU16>,
-    warnings: RawInt<LeU16>,
-    info: RawBytes<'a, LenEnc>,
-    session_state_info: RawBytes<'a, LenEnc>,
+// /// OK send instead of EOF still require 0xFE header, but OK packet content.
+// /// Represents MySql's Ok packet.
+// #[derive(Debug, Clone, Eq, PartialEq)]
+// pub struct EofPacket<'a> {
+//     affected_rows: RawInt<LenEnc>,
+//     last_insert_id: RawInt<LenEnc>,
+//     status_flags: Const<StatusFlags, LeU16>,
+//     warnings: RawInt<LeU16>,
+//     info: RawBytes<'a, LenEnc>,
+//     session_state_info: RawBytes<'a, LenEnc>,
 
-    capabilities: CapabilityFlags,
-}
+//     capabilities: CapabilityFlags,
+// }
 
-// OK: header = 0 and length of packet >= 7
-// EOF: header = 0xfe and length of packet < 8
-#[allow(unused)]
-impl<'a> OkPacket2<'a> {
-    const HEADER: u8 = 0xFE;
-    pub fn new(
-        affected_rows: u64,
-        last_insert_id: u64,
-        status_flags: StatusFlags,
-        warnings: u16,
-        info: impl Into<Cow<'a, [u8]>>,
-        session_state_info: impl Into<Cow<'a, [u8]>>,
-        capabilities: CapabilityFlags,
-    ) -> Self {
-        Self {
-            affected_rows: RawInt::new(affected_rows),
-            last_insert_id: RawInt::new(last_insert_id),
-            status_flags: Const::new(status_flags),
-            warnings: RawInt::new(warnings),
-            info: RawBytes::new(info.into()),
-            session_state_info: RawBytes::new(session_state_info.into()),
+// // OK: header = 0 and length of packet >= 7
+// // EOF: header = 0xfe and length of packet < 8
+// #[allow(unused)]
+// impl<'a> EofPacket<'a> {
+//     const HEADER: u8 = 0xFE;
+//     pub fn new(
+//         affected_rows: u64,
+//         last_insert_id: u64,
+//         status_flags: StatusFlags,
+//         warnings: u16,
+//         info: impl Into<Cow<'a, [u8]>>,
+//         session_state_info: impl Into<Cow<'a, [u8]>>,
+//         capabilities: CapabilityFlags,
+//     ) -> Self {
+//         Self {
+//             affected_rows: RawInt::new(affected_rows),
+//             last_insert_id: RawInt::new(last_insert_id),
+//             status_flags: Const::new(status_flags),
+//             warnings: RawInt::new(warnings),
+//             info: RawBytes::new(info.into()),
+//             session_state_info: RawBytes::new(session_state_info.into()),
 
-            capabilities,
-        }
-    }
-}
+//             capabilities,
+//         }
+//     }
+// }
 
 // sql/protocol_classics.cc `net_send_ok`
-impl<'a> MySerialize for OkPacket2<'a> {
-    fn serialize(&self, buf: &mut Vec<u8>) {
-        buf.put_u8(OkPacket2::HEADER);
-        self.affected_rows.serialize(buf);
-        self.last_insert_id.serialize(buf);
+// impl<'a> MySerialize for OkPacket2<'a> {
+//     fn serialize(&self, buf: &mut Vec<u8>) {
+//         buf.put_u8(OkPacket2::HEADER);
+//         self.affected_rows.serialize(buf);
+//         self.last_insert_id.serialize(buf);
 
-        if self
-            .capabilities
-            .contains(CapabilityFlags::CLIENT_PROTOCOL_41)
-        {
-            self.status_flags.serialize(buf);
-            self.warnings.serialize(buf);
-        } else if self
-            .capabilities
-            .contains(CapabilityFlags::CLIENT_TRANSACTIONS)
-        {
-            self.status_flags.serialize(buf);
-        }
+//         if self
+//             .capabilities
+//             .contains(CapabilityFlags::CLIENT_PROTOCOL_41)
+//         {
+//             self.status_flags.serialize(buf);
+//             self.warnings.serialize(buf);
+//         } else if self
+//             .capabilities
+//             .contains(CapabilityFlags::CLIENT_TRANSACTIONS)
+//         {
+//             self.status_flags.serialize(buf);
+//         }
 
-        if self
-            .capabilities
-            .contains(CapabilityFlags::CLIENT_SESSION_TRACK)
-        {
-            if self
-                .status_flags
-                .contains(StatusFlags::SERVER_SESSION_STATE_CHANGED)
-            {
-                self.info.serialize(buf);
-            } else {
-                self.session_state_info.serialize(buf);
-            }
-        } else {
-            self.info.serialize(buf);
-        }
-    }
-}
+//         if self
+//             .capabilities
+//             .contains(CapabilityFlags::CLIENT_SESSION_TRACK)
+//         {
+//             if self
+//                 .status_flags
+//                 .contains(StatusFlags::SERVER_SESSION_STATE_CHANGED)
+//             {
+//                 self.info.serialize(buf);
+//             } else {
+//                 self.session_state_info.serialize(buf);
+//             }
+//         } else {
+//             self.info.serialize(buf);
+//         }
+//     }
+// }
 
 #[allow(unused)]
 /// MySql error packet.
@@ -997,6 +1006,7 @@ pub struct TextResultsetRow<'a> {
     data: RawBytes<'a, LenEnc>,
 }
 
+#[allow(unused)]
 impl<'a> TextResultsetRow<'a> {
     pub fn new(data: Option<impl Into<Cow<'a, [u8]>>>) -> Self {
         Self {
@@ -1017,15 +1027,29 @@ impl MySerialize for TextResultsetRow<'_> {
     }
 }
 
+
+#[allow(unused)]
 #[cfg(test)]
 mod tests {
+    use mysql_async::consts::CapabilityFlags;
     use mysql_common::{packets::ComBinlogDumpGtid, proto::MySerialize};
 
     use crate::{
         constants::ColumnDefinitionFlags,
-        get_capabilities, get_server_status,
+         get_server_status,
         packets::{ColumnDefinition, OkPacket, TextResultsetRow},
     };
+
+    fn get_capabilities() -> CapabilityFlags {
+        CapabilityFlags::CLIENT_PROTOCOL_41
+        | CapabilityFlags::CLIENT_PLUGIN_AUTH
+        | CapabilityFlags::CLIENT_SECURE_CONNECTION
+        | CapabilityFlags::CLIENT_CONNECT_WITH_DB
+        | CapabilityFlags::CLIENT_TRANSACTIONS
+        | CapabilityFlags::CLIENT_CONNECT_ATTRS
+        // | CapabilityFlags::CLIENT_QUERY_ATTRIBUTES
+        | CapabilityFlags::CLIENT_DEPRECATE_EOF
+    }
 
     #[test]
     fn test_build_column_definition() {
@@ -1065,10 +1089,10 @@ mod tests {
             String::new().as_bytes(),
             String::new().as_bytes(),
             get_capabilities(),
+            false,
         )
         .serialize(&mut buffer);
 
         println!("buffer: {:?}", buffer);
-
     }
 }

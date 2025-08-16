@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{ sync::Arc};
 
 use anyhow::{Result, anyhow};
 use bytes::{Buf, BufMut, BytesMut};
@@ -42,7 +42,8 @@ const SERVER_LANGUAGE: u8 = 8;
 // 缓冲区大小
 const READ_BUFFER_SIZE: usize = 0xFFFF;
 
-fn get_capabilities() -> CapabilityFlags {
+#[inline]
+fn server_def_capabilities() -> CapabilityFlags {
     CapabilityFlags::CLIENT_PROTOCOL_41
         | CapabilityFlags::CLIENT_PLUGIN_AUTH
         | CapabilityFlags::CLIENT_SECURE_CONNECTION
@@ -70,10 +71,10 @@ fn new_handshake_packet(scramble: &[u8; SCRAMBLE_BUFFER_SIZE], connection_id: u3
         connection_id,
         scramble_1,
         Some(scramble_2),
-        get_capabilities(),
+        server_def_capabilities(),
         SERVER_LANGUAGE,
         get_server_status(),
-        AuthPlugin::CachingSha2Password.as_bytes().into(),
+        AuthPlugin::MysqlNativePassword.as_bytes().into(),
     );
 
     let mut src = BytesMut::new();
@@ -141,7 +142,8 @@ async fn handle_handshake_response<'a>(
             0,
             String::new().as_bytes(),
             String::new().as_bytes(),
-            get_capabilities(),
+            *client_capabilities,
+            false,
         )
         .serialize(&mut buf);
     } else {
@@ -153,7 +155,7 @@ async fn handle_handshake_response<'a>(
                 user, empty_pass
             )
             .as_bytes(),
-            get_capabilities(),
+            *client_capabilities,
         ))
         .serialize(&mut buf);
     }
@@ -164,7 +166,7 @@ async fn handle_handshake_response<'a>(
 // 处理命令
 fn handle_command_response(
     src: &mut BytesMut,
-    _client_capabilities: &CapabilityFlags,
+    client_capabilities: &CapabilityFlags,
     session_vars: &mut Vec<Variable>,
 ) -> Result<(Vec<BytesMut>, Command)> {
     println!("src::.length::{}", src.len());
@@ -176,7 +178,7 @@ fn handle_command_response(
     match command {
         Command::COM_QUERY => {
             let query: RawBytes<EofBytes> = buf.parse(())?;
-            let ret = handle_command_query(&query.as_str(), session_vars)?;
+            let ret = handle_command_query(&query.as_str(), session_vars, client_capabilities)?;
             return Ok((ret, command));
         }
         Command::COM_QUIT => {
@@ -196,7 +198,8 @@ fn handle_command_response(
         0,
         String::new().as_bytes(),
         String::new().as_bytes(),
-        get_capabilities(),
+        *client_capabilities,
+        false
     )
     .serialize(&mut buf);
 
@@ -219,7 +222,7 @@ enum ServerPhaseDesc {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let listener = TcpListener::bind("127.0.0.1:8080").await?;
+    let listener = TcpListener::bind("0.0.0.0:8080").await?;
     println!("MySQL Server listen to 127.0.0.1:8080...");
     let connection_id = Arc::new(Mutex::new(10));
     loop {
@@ -345,9 +348,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 );
 
                                                 // 如果server_id与本机以及和其他slave相同，则报错
-                                                
 
-                                                let file_data = std::fs::read("/Users/lbk/mysqltest/data/relay-bin/relay-bin.000000001").unwrap();
+                                                let file_data = std::fs::read("C:\\Users\\BK-liao\\mysqltest\\data\\relay-bin\\relay-bin.000000001").unwrap();
                                                 let mut binlog_file = BinlogFile::new(
                                                     BinlogVersion::Version4,
                                                     &file_data[..],
@@ -367,9 +369,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     src.put_u8(0x00);
                                                     src.extend_from_slice(&output);
 
-                                                    packet_codec.encode(&mut src, &mut dst).unwrap();
+                                                    packet_codec
+                                                        .encode(&mut src, &mut dst)
+                                                        .unwrap();
                                                     if let Err(e) = socket.write_all(&dst).await {
-                                                        eprintln!("failed to write to socket; err = {:?}", e);
+                                                        eprintln!(
+                                                            "failed to write to socket; err = {:?}",
+                                                            e
+                                                        );
                                                         break;
                                                     } else {
                                                         println!("Event dump.");
@@ -421,26 +428,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             socket.flush().await.unwrap();
                         } else {
                             common_buffer.clear();
+
+                            // 兼容mariadb
+                            let is_mariadb = false;
+                            let mut packets: Vec<BytesMut> = vec![];
+
                             loop {
-                                if buffers.len() == 0 {
+                                if buffers.is_empty() {
                                     break;
                                 }
                                 let mut src = buffers.remove(0);
                                 let mut dst = BytesMut::new();
                                 packet_codec.encode(&mut src, &mut dst).unwrap();
-                                common_buffer.extend_from_slice(&dst);
-
-                                println!("ServerResponse:: buffer:: {:?}", common_buffer);
-                                println!(
-                                    ">>>>ServerResponse:: buffer:vec:: {:?}",
-                                    common_buffer.to_vec()
-                                );
-                                if let Err(e) = socket.write_all(&common_buffer).await {
-                                    eprintln!("failed to write to socket; err = {:?}", e);
-                                    return;
+                                // common_buffer.extend_from_slice(&dst);
+                                if is_mariadb {
+                                    packets.push(dst);
+                                } else {
+                                    println!("ServerResponse:: buffer:: {:?}", dst);
+                                    println!(
+                                        ">>>>ServerResponse:: buffer:vec:: {:?}",
+                                        dst.to_vec()
+                                    );
+                                    if let Err(e) = socket.write_all(&dst).await {
+                                        eprintln!("failed to write to socket; err = {:?}", e);
+                                        return;
+                                    }
+                                    socket.flush().await.unwrap();
                                 }
-                                common_buffer.clear();
-                                socket.flush().await.unwrap();
+                            }
+
+                            // 包合并
+                            if is_mariadb {
+                                loop {
+                                    common_buffer.clear();
+
+                                    if packets.is_empty() {
+                                        break;
+                                    }
+                                    let src = packets.remove(0);
+                                    common_buffer.extend_from_slice(&src);
+                                    for p in packets.iter() {
+                                        common_buffer.extend_from_slice(&p);
+                                    }
+
+                                    println!("ServerResponse:: buffer:: {:?}", common_buffer);
+                                    println!(
+                                        ">>>>ServerResponse:: buffer:vec:: {:?}",
+                                        common_buffer.to_vec()
+                                    );
+                                    if let Err(e) = socket.write_all(&common_buffer).await {
+                                        eprintln!("failed to write to socket; err = {:?}", e);
+                                        return;
+                                    }
+                                    socket.flush().await.unwrap();
+                                }
                             }
                         }
 

@@ -8,8 +8,9 @@ lazy_static! {
         vars.push(Variable::new("version_comment".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "MySQL Community Server (GPL)".to_owned()));
         vars.push(Variable::new("server_id".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "1".to_owned()));
         vars.push(Variable::new("server_uuid".to_owned(), VARIABLE_SCOPE_GLOBAL, false, Uuid::new_v4().to_string()));
-        vars.push(Variable::new("binlog_checksum".to_owned(), VARIABLE_SCOPE_GLOBAL, false, Uuid::new_v4().to_string()));
+        vars.push(Variable::new("binlog_checksum".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "CRC32".to_owned()));
         vars.push(Variable::new("gtid_mode".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "ON".to_owned()));
+        vars.push(Variable::new("rpl_semi_sync_master_enabled".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "0".to_owned()));
         vars.push(Variable::new(SESSION_CHARSET_KEY_NAME.to_owned(), VARIABLE_SCOPE_SESSION, true, "utf8".to_string()));
         vars
     };
@@ -19,6 +20,7 @@ pub const VARIABLE_SCOPE_GLOBAL: u8 = 1;
 pub const VARIABLE_SCOPE_SESSION: u8 = 2;
 pub const SESSION_CHARSET_KEY_NAME: &'static str = "__charset";
 
+#[allow(unused)]
 #[derive(Debug, Clone)]
 pub struct Variable {
     name: String,
@@ -51,11 +53,20 @@ impl Variable {
     pub fn value(&self) -> &String {
         &self.default_value
     }
+
+    pub fn name(&self) -> &String {
+        &self.name
+    }
+
+    pub fn dynamic(&self) -> bool {
+        self.dynamic
+    }
 }
 
 // 
 // id: @@session, @@global
 // 
+#[allow(unused)]
 pub fn get_global_var(name: &str) -> Result<Variable> {
     for var in SYSVARS.iter() {
         // name==name
@@ -67,6 +78,7 @@ pub fn get_global_var(name: &str) -> Result<Variable> {
     Err(anyhow!("Unknown {} variable '{}'", if name.starts_with("@@") { "system" } else { "user" }, name))
 }
 
+#[allow(unused)]
 pub fn set_global_var(name: &str, _value: &str) -> Result<()>{
     // for var in SYSVARS.iter() {
     //     // name==name
@@ -79,7 +91,7 @@ pub fn set_global_var(name: &str, _value: &str) -> Result<()>{
     Err(anyhow!("Variable '{}' is a read only variable", name))
 }
 
-
+#[allow(unused)]
 pub fn set_session_var(session_vars: &mut Vec<Variable>, name: &str, value: &str) -> Result<()>{
     let mut exists = false;
     for var in session_vars.iter_mut() {
@@ -96,6 +108,7 @@ pub fn set_session_var(session_vars: &mut Vec<Variable>, name: &str, value: &str
     Ok(())
 }
 
+#[allow(unused)]
 pub fn get_session_var(session_vars: &mut Vec<Variable>, name: &str) -> Result<Variable>{
     for var in session_vars.iter() {
         // name==name

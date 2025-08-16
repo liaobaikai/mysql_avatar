@@ -1,33 +1,25 @@
-use std::{
-    borrow::Cow,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
-use bytes::{BufMut, BytesMut};
+use bytes::BytesMut;
 use chrono::Utc;
 use mysql_async::consts::CapabilityFlags;
 use mysql_common::{
     misc::raw::{RawBytes, RawInt, int::LenEnc},
-    packets::SqlState,
+    packets::OldEofPacket,
     proto::MySerialize,
 };
 use sqlparser::{
-    ast::{Expr, Select, SelectItem, SetExpr, Statement, ValueWithSpan},
+    ast::{Expr, Select, SelectItem, SetExpr, Statement},
     dialect::MySqlDialect,
     parser::Parser,
 };
 
 use crate::{
-    constants::{ColumnDefinitionFlags, ResultSetMetadata},
-    get_capabilities, get_server_status,
-    packets::{
-        ColumnDefinition, EofPacket, ErrPacket, OkPacket, OkPacket2, ServerError, TextResultsetRow,
-    },
-    vars::{
-        SESSION_CHARSET_KEY_NAME, VARIABLE_SCOPE_SESSION, Variable, get_global_var,
-        get_session_var, set_session_var,
-    },
+    constants::ColumnDefinitionFlags,
+    get_server_status,
+    packets::{ColumnDefinition, EofPacket, OkPacket},
+    vars::{SESSION_CHARSET_KEY_NAME, Variable, get_global_var, get_session_var, set_session_var},
 };
 
 // fn unsupport_session(sql: &str, _var: &str) -> Vec<u8> {
@@ -134,7 +126,37 @@ fn serialize_str<'a>(buffer: &mut BytesMut, text: &'a str) {
     buffer.extend_from_slice(&value);
 }
 
-#[allow(unused)]
+fn serialize_str2<'a>(text: &'a str) -> BytesMut {
+    let mut buffer = BytesMut::new();
+    serialize_str(&mut buffer, text);
+    buffer
+}
+
+fn serialize_col(buffer: &mut BytesMut, col_name: &str) {
+    let mut column_data = vec![];
+    ColumnDefinition::new(
+        &[],
+        &[],
+        &[],
+        col_name.as_bytes(),
+        &[],
+        63,
+        1,
+        8,
+        ColumnDefinitionFlags::BINARY_FLAG as u16,
+        0,
+    )
+    .serialize(&mut column_data);
+    buffer.extend_from_slice(&column_data)
+}
+
+fn serialize_col2(col_name: &str) -> BytesMut {
+    let mut buffer = BytesMut::new();
+    serialize_col(&mut buffer, col_name);
+    buffer
+}
+
+// #[allow(unused)]
 fn query_select_text_resultset_col_count_packet(column_count: u64) -> BytesMut {
     let mut buffer = BytesMut::new();
     let column_count: RawInt<LenEnc> = RawInt::new(column_count);
@@ -144,27 +166,27 @@ fn query_select_text_resultset_col_count_packet(column_count: u64) -> BytesMut {
     buffer
 }
 
-#[allow(unused)]
-fn query_select_text_resultset_col_definition_packet(key: &str) -> ColumnDefinition {
-    ColumnDefinition::new(
-        "".as_bytes(),
-        "".as_bytes(),
-        "".as_bytes(),
-        key.as_bytes(),
-        "".as_bytes(),
-        63,     // binary
-        0xFFFF, //
-        8,      // binary
-        ColumnDefinitionFlags::BINARY_FLAG as u16,
-        0x00,
-    )
-}
+// #[allow(unused)]
+// fn query_select_text_resultset_col_definition_packet(key: &str) -> ColumnDefinition {
+//     ColumnDefinition::new(
+//         "".as_bytes(),
+//         "".as_bytes(),
+//         "".as_bytes(),
+//         key.as_bytes(),
+//         "".as_bytes(),
+//         63,     // binary
+//         0xFFFF, //
+//         8,      // binary
+//         ColumnDefinitionFlags::BINARY_FLAG as u16,
+//         0x00,
+//     )
+// }
 
 pub fn handle_query_select(
     s: Box<Select>,
     session_vars: &mut Vec<Variable>,
+    client_capabilities: &CapabilityFlags,
 ) -> Result<Vec<BytesMut>> {
-    let mut packets: Vec<BytesMut> = vec![];
     //
     let mut column_definitions: Vec<BytesMut> = vec![];
     let mut column_values: Vec<BytesMut> = vec![];
@@ -205,21 +227,22 @@ pub fn handle_query_select(
                                                     &format!("{unix_timestamp}"),
                                                 );
 
-                                                let mut column_data = vec![];
-                                                ColumnDefinition::new(
-                                                    &[],
-                                                    &[],
-                                                    &[],
-                                                    format!("{}()", id.value).as_bytes(),
-                                                    &[],
-                                                    63,
-                                                    val.len() as u32,
-                                                    8,
-                                                    ColumnDefinitionFlags::BINARY_FLAG as u16,
-                                                    0,
-                                                )
-                                                .serialize(&mut column_data);
-                                                col.extend_from_slice(&column_data);
+                                                // let mut column_data = vec![];
+                                                // ColumnDefinition::new(
+                                                //     &[],
+                                                //     &[],
+                                                //     &[],
+                                                //     format!("{}()", id.value).as_bytes(),
+                                                //     &[],
+                                                //     63,
+                                                //     val.len() as u32,
+                                                //     8,
+                                                //     ColumnDefinitionFlags::BINARY_FLAG as u16,
+                                                //     0,
+                                                // )
+                                                // .serialize(&mut column_data);
+                                                // col.extend_from_slice(&column_data);
+                                                serialize_col(&mut col, &format!("{}()", id.value));
                                             }
                                         }
                                         _ => {}
@@ -233,31 +256,30 @@ pub fn handle_query_select(
                     Expr::Identifier(id) => {
                         let name = id.value;
                         if name.starts_with("@") {
-                            let mut data = vec![];
-                            data.extend_from_slice(name.as_bytes());
+                            // let mut data = vec![];
+                            // data.extend_from_slice(name.as_bytes());
                             let var = get_session_var(session_vars, &name)?;
-                            let mut value = BytesMut::new();
+                            // let mut value = BytesMut::new();
                             // value.extend_from_slice(var.value().as_bytes());
 
-                            let mut column_data = vec![];
-                            let mut column_data_mut = BytesMut::new();
-                            ColumnDefinition::new(
-                                &[],
-                                &[],
-                                &[],
-                                data,
-                                &[],
-                                63,
-                                var.value().len() as u32,
-                                8,
-                                ColumnDefinitionFlags::BINARY_FLAG as u16,
-                                0,
-                            )
-                            .serialize(&mut column_data);
-                            column_data_mut.extend_from_slice(&column_data);
-
-                            serialize_str(&mut value, var.value());
-                            (column_data_mut, value)
+                            // let mut column_data = vec![];
+                            // let mut column_data_mut = BytesMut::new();
+                            // ColumnDefinition::new(
+                            //     &[],
+                            //     &[],
+                            //     &[],
+                            //     data,
+                            //     &[],
+                            //     63,
+                            //     var.value().len() as u32,
+                            //     8,
+                            //     ColumnDefinitionFlags::BINARY_FLAG as u16,
+                            //     0,
+                            // )
+                            // .serialize(&mut column_data);
+                            // column_data_mut.extend_from_slice(&column_data);
+                            // serialize_col2(&name);
+                            (serialize_col2(&name), serialize_str2(var.value()))
                         } else {
                             (BytesMut::new(), BytesMut::new())
                         }
@@ -265,34 +287,17 @@ pub fn handle_query_select(
                     Expr::CompoundIdentifier(cid) => {
                         // a.b
                         let (var, name) = get_var(session_vars, cid)?;
-                        let (len, value) = match var {
-                            Some(v) => {
-                                let mut value = BytesMut::new();
-                                serialize_str(&mut value, v.value());
-                                (v.value().len(), value)
-                            }
-                            None => (0, BytesMut::new()),
+                        let value = match var {
+                            Some(v) => serialize_str2(v.value()),
+                            None => BytesMut::new(),
                         };
 
-                        let mut data = vec![];
-                        data.extend_from_slice(name.as_bytes());
-                        let mut column_data = vec![];
-                        let mut column_data_mut = BytesMut::new();
-                        ColumnDefinition::new(
-                            &[],
-                            &[],
-                            &[],
-                            data,
-                            &[],
-                            63,
-                            len as u32,
-                            8,
-                            ColumnDefinitionFlags::BINARY_FLAG as u16,
-                            0,
-                        )
-                        .serialize(&mut column_data);
-                        column_data_mut.extend_from_slice(&column_data);
-                        (column_data_mut, value)
+                        // let mut data = vec![];
+                        // data.extend_from_slice(name.as_bytes());
+                        // let mut column_data = vec![];
+                        // let mut column_data_mut = serialize_col2(&name);
+
+                        (serialize_col2(&name), value)
                     }
                     // Expr::BinaryOp { left: _, op: _, right: _ } => {
                     // match *left {
@@ -347,52 +352,83 @@ pub fn handle_query_select(
         }
     }
 
+    Ok(build_packet(
+        column_definitions,
+        vec![column_values],
+        client_capabilities,
+    ))
+}
+
+fn build_packet(
+    column_definitions: Vec<BytesMut>,
+    rows: Vec<Vec<BytesMut>>,
+    client_capabilities: &CapabilityFlags,
+) -> Vec<BytesMut> {
+    let mut packets: Vec<BytesMut> = vec![];
+    let mut column_definitions_ = column_definitions.clone();
+    let mut rows_ = rows.clone();
+
     // part1: 列数
     packets.push(query_select_text_resultset_col_count_packet(
-        column_definitions.len() as u64,
+        column_definitions_.len() as u64,
     ));
 
     // part2: 每列拆分一个包，多列多个包
     loop {
-        if column_definitions.is_empty() {
+        if column_definitions_.is_empty() {
             break;
         }
-        packets.push(column_definitions.remove(0));
+        packets.push(column_definitions_.remove(0));
+    }
+
+    println!("client_capabilities: {client_capabilities:?}");
+    if !client_capabilities.contains(CapabilityFlags::CLIENT_DEPRECATE_EOF) {
+        // Marker to set the end of metadata
+        let mut buffer = BytesMut::new();
+        let mut data = vec![];
+        EofPacket::new(get_server_status(), 0, *client_capabilities).serialize(&mut data);
+        buffer.extend_from_slice(&data);
+        packets.push(buffer.clone());
     }
 
     // part3: 一行放一个包，多行多个包
-    let mut buffer = BytesMut::new();
-    loop {
-        if column_values.is_empty() {
-            break;
+    for row in rows_.iter_mut() {
+        let mut buffer = BytesMut::new();
+        loop {
+            if row.is_empty() {
+                break;
+            }
+            let value = row.remove(0);
+            buffer.extend_from_slice(&value);
         }
-        let value = column_values.remove(0);
-        buffer.extend_from_slice(&value);
+        packets.push(buffer.clone());
     }
-    packets.push(buffer.clone());
+
+    // 如果中间有错误，则返回ERR_Packet
 
     // part4: 结束
-    buffer.clear();
+    let mut buffer = BytesMut::new();
     let mut data = vec![];
-    if !get_capabilities().contains(CapabilityFlags::CLIENT_DEPRECATE_EOF) {
-        EofPacket::new(get_server_status(), 0, get_capabilities()).serialize(&mut data);
-        buffer.extend_from_slice(&data);
-    } else if get_capabilities().contains(CapabilityFlags::CLIENT_DEPRECATE_EOF) {
-        OkPacket2::new(
+    if client_capabilities.contains(CapabilityFlags::CLIENT_DEPRECATE_EOF) {
+        OkPacket::new(
             0,
             0,
             get_server_status(),
             0,
             String::new().as_bytes(),
             String::new().as_bytes(),
-            get_capabilities(),
+            *client_capabilities,
+            true,
         )
         .serialize(&mut data);
-        buffer.extend_from_slice(&data);
+    } else {
+        EofPacket::new(get_server_status(), 0, *client_capabilities).serialize(&mut data);
     }
+    buffer.extend_from_slice(&data);
+
     packets.push(buffer.clone());
 
-    Ok(packets)
+    packets
 }
 
 fn get_var(
@@ -442,7 +478,11 @@ fn get_var(
 // }
 
 //
-fn handle_command_set(set: sqlparser::ast::Set, session_vars: &mut Vec<Variable>) -> Result<()> {
+fn handle_command_set(
+    set: sqlparser::ast::Set,
+    session_vars: &mut Vec<Variable>,
+    _client_capabilities: &CapabilityFlags,
+) -> Result<()> {
     match set {
         sqlparser::ast::Set::SingleAssignment {
             scope: _,
@@ -490,7 +530,10 @@ fn get_var_setting_key(variable: sqlparser::ast::ObjectName) -> String {
     name
 }
 
-fn get_var_setting_value(session_vars: &mut Vec<Variable>, exp: Expr) -> Result<String, anyhow::Error> {
+fn get_var_setting_value(
+    session_vars: &mut Vec<Variable>,
+    exp: Expr,
+) -> Result<String, anyhow::Error> {
     let value = match exp {
         Expr::Identifier(id) => {
             let var = get_session_var(session_vars, &id.value)?;
@@ -503,14 +546,12 @@ fn get_var_setting_value(session_vars: &mut Vec<Variable>, exp: Expr) -> Result<
                 None => String::new(),
             }
         }
-        Expr::Value(vw) => {
-            match vw.value {
-                sqlparser::ast::Value::SingleQuotedString(s) | sqlparser::ast::Value::DoubleQuotedString(s) => {
-                    s
-                },
-                _ => String::new()
-            }
-        }
+        Expr::Value(vw) => match vw.value {
+            sqlparser::ast::Value::SingleQuotedString(s)
+            | sqlparser::ast::Value::DoubleQuotedString(s) => s,
+            sqlparser::ast::Value::Number(val, _) => val,
+            _ => String::new(),
+        },
         _ => String::new(),
     };
     Ok(value)
@@ -518,7 +559,11 @@ fn get_var_setting_value(session_vars: &mut Vec<Variable>, exp: Expr) -> Result<
 
 // 返回实际数据
 //
-pub fn handle_command_query(sql: &str, session_vars: &mut Vec<Variable>) -> Result<Vec<BytesMut>> {
+pub fn handle_command_query(
+    sql: &str,
+    session_vars: &mut Vec<Variable>,
+    client_capabilities: &CapabilityFlags,
+) -> Result<Vec<BytesMut>> {
     let mut buf = BytesMut::new();
 
     for stmt in Parser::parse_sql(&MySqlDialect {}, &sql)? {
@@ -526,13 +571,13 @@ pub fn handle_command_query(sql: &str, session_vars: &mut Vec<Variable>) -> Resu
             Statement::Query(q) => match *q.body {
                 SetExpr::Select(s) => {
                     println!("select: {:?}", s);
-                    return Ok(handle_query_select(s, session_vars)?);
+                    return Ok(handle_query_select(s, session_vars, client_capabilities)?);
                 }
                 _ => {}
             },
             Statement::Set(s) => {
                 println!("set: {:?}", s);
-                handle_command_set(s, session_vars)?;
+                handle_command_set(s, session_vars, client_capabilities)?;
 
                 let mut data = vec![];
                 OkPacket::new(
@@ -542,11 +587,60 @@ pub fn handle_command_query(sql: &str, session_vars: &mut Vec<Variable>) -> Resu
                     0,
                     String::new().as_bytes(),
                     String::new().as_bytes(),
-                    get_capabilities(),
+                    *client_capabilities,
+                    false,
                 )
                 .serialize(&mut data);
                 buf.extend_from_slice(&data);
             }
+            Statement::ShowVariables {
+                filter,
+                global: _,
+                session: _,
+            } => match filter {
+                Some(f) => match f {
+                    sqlparser::ast::ShowStatementFilter::Like(v) => {
+                        println!("v: {}", v);
+                        let mut column_definitions: Vec<BytesMut> = vec![];
+                        let mut column_values: Vec<BytesMut> = vec![];
+
+                        // Variable_name, Value
+                        column_definitions.push(serialize_col2("Variable_name"));
+                        column_definitions.push(serialize_col2("Value"));
+
+                        let var = get_session_var(session_vars, &v)?;
+                        column_values.push(serialize_str2(&var.name()));
+                        column_values.push(serialize_str2(&var.value()));
+
+                        return Ok(build_packet(
+                            column_definitions,
+                            vec![column_values],
+                            client_capabilities,
+                        ));
+                    }
+                    _ => {}
+                },
+                _ => {
+                    // 返回所有参数
+                    let mut column_definitions: Vec<BytesMut> = vec![];
+                    // Variable_name, Value
+                    column_definitions.push(serialize_col2("Variable_name"));
+                    column_definitions.push(serialize_col2("Value"));
+
+                    let mut rows = Vec::new();
+                    for var in session_vars.iter() {
+                        if var.dynamic() {
+                            continue;
+                        }
+                        let mut column_values: Vec<BytesMut> = vec![];
+                        column_values.push(serialize_str2(&var.name()));
+                        column_values.push(serialize_str2(&var.value()));
+                        rows.push(column_values);
+                    }
+
+                    return Ok(build_packet(column_definitions, rows, client_capabilities));
+                }
+            },
             _ => {}
         }
     }
