@@ -1,12 +1,16 @@
 use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{Result, anyhow};
-use bytes::{Buf, BytesMut};
-use mysql_async::consts::{CapabilityFlags, StatusFlags};
+use bytes::{Buf, BufMut, BytesMut};
+use mysql_async::{
+    binlog::BinlogVersion,
+    consts::{CapabilityFlags, StatusFlags},
+};
 use mysql_common::{
+    binlog::BinlogFile,
     io::ParseBuf,
     misc::raw::{RawBytes, RawInt, bytes::EofBytes},
-    packets::{AuthPlugin, SqlState},
+    packets::{AuthPlugin, ComBinlogDump, ComBinlogDumpGtid, SqlState},
     proto::{MyDeserialize, MySerialize, codec::PacketCodec},
 };
 
@@ -19,7 +23,8 @@ use tokio::{
 use crate::{
     command::handle_command_query,
     constants::Command,
-    packets::{ErrPacket, HandshakePacket, HandshakeResponse, OkPacket, ServerError}, vars::{Variable, SYSVARS},
+    packets::{ErrPacket, HandshakePacket, HandshakeResponse, OkPacket, ServerError},
+    vars::{SYSVARS, Variable},
 };
 // mod codec;
 mod command;
@@ -161,21 +166,25 @@ fn handle_command_response(
     src: &mut BytesMut,
     _client_capabilities: &CapabilityFlags,
     session_vars: &mut Vec<Variable>,
-) -> Result<Vec<BytesMut>> {
+) -> Result<(Vec<BytesMut>, Command)> {
+    println!("src::.length::{}", src.len());
     let mut buf = ParseBuf(&src);
     let command: RawInt<u8> = buf.parse(())?;
     // println!("command: {:?}", *command);
-    println!("command: {:?}", Command::try_from(*command));
-    match Command::try_from(*command)? {
+    let command = Command::try_from(*command)?;
+    println!("command: {:?}", command);
+    match command {
         Command::COM_QUERY => {
             let query: RawBytes<EofBytes> = buf.parse(())?;
             let ret = handle_command_query(&query.as_str(), session_vars)?;
-            return Ok(ret);
+            return Ok((ret, command));
         }
         Command::COM_QUIT => {
             // Closed
             return Err(anyhow!("Connection closed"));
         }
+        Command::COM_REGISTER_SLAVE => {}
+        Command::COM_BINLOG_DUMP | Command::COM_BINLOG_DUMP_GTID => return Ok((vec![], command)),
         _ => {}
     }
 
@@ -193,7 +202,7 @@ fn handle_command_response(
 
     src.clear();
     src.extend_from_slice(&buf);
-    Ok(vec![std::mem::take(src)])
+    Ok((vec![std::mem::take(src)], command))
 }
 
 enum ServerPhaseDesc {
@@ -305,22 +314,86 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ServerPhaseDesc::Command => {
                                 // 7. 登录成功，切换至命令阶段
                                 println!("Command: {:?}", common_buffer);
-                                let mut ret = match handle_command_response(
+                                let mut bufs = match handle_command_response(
                                     &mut common_buffer,
                                     &client_capabilities,
                                     &mut session_vars,
                                 ) {
-                                    Ok(ret) => ret,
+                                    Ok((buf, com)) => {
+                                        match com {
+                                            Command::COM_BINLOG_DUMP => {
+                                                let com_binlog_dump = ComBinlogDump::deserialize(
+                                                    (),
+                                                    &mut ParseBuf(&common_buffer),
+                                                )
+                                                .unwrap();
+                                                println!("com_binlog_dump: {:?}", com_binlog_dump);
+
+                                                vec![]
+                                            }
+                                            Command::COM_BINLOG_DUMP_GTID => {
+                                                // 按位点找文件
+                                                let com_binlog_dump_gtid =
+                                                    ComBinlogDumpGtid::deserialize(
+                                                        (),
+                                                        &mut ParseBuf(&common_buffer),
+                                                    )
+                                                    .unwrap();
+                                                println!(
+                                                    "com_binlog_dump_gtid: {:?}",
+                                                    com_binlog_dump_gtid
+                                                );
+
+                                                // 如果server_id与本机以及和其他slave相同，则报错
+                                                
+
+                                                let file_data = std::fs::read("/Users/lbk/mysqltest/data/relay-bin/relay-bin.000000001").unwrap();
+                                                let mut binlog_file = BinlogFile::new(
+                                                    BinlogVersion::Version4,
+                                                    &file_data[..],
+                                                )
+                                                .unwrap();
+
+                                                while let Some(ev) = binlog_file.next() {
+                                                    let ev = ev.unwrap();
+                                                    let _ = dbg!(ev.header().event_type());
+                                                    let binlog_version = ev.fde().binlog_version();
+
+                                                    let mut output = Vec::new();
+                                                    ev.write(binlog_version, &mut output).unwrap();
+
+                                                    let mut src = BytesMut::new();
+                                                    let mut dst = BytesMut::new();
+                                                    src.put_u8(0x00);
+                                                    src.extend_from_slice(&output);
+
+                                                    packet_codec.encode(&mut src, &mut dst).unwrap();
+                                                    if let Err(e) = socket.write_all(&dst).await {
+                                                        eprintln!("failed to write to socket; err = {:?}", e);
+                                                        break;
+                                                    } else {
+                                                        println!("Event dump.");
+                                                    }
+                                                }
+
+                                                vec![]
+                                            }
+
+                                            _ => buf,
+                                        }
+                                    }
                                     Err(e) => {
                                         println!("{e}");
                                         break;
                                     }
                                 };
-                                common_buffer.clear();
-                                buffers.append(&mut ret);
+                                if bufs.len() > 0 {
+                                    common_buffer.clear();
+                                    buffers.append(&mut bufs);
 
-                                // 8.处理命令后响应给客户端
-                                status = ServerPhaseDesc::ServerResponse;
+                                    // 8.处理命令后响应给客户端
+                                    status = ServerPhaseDesc::ServerResponse;
+                                }
                             }
                             _ => {}
                         }
@@ -385,12 +458,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[allow(unused)]
 #[cfg(test)]
 mod tests {
+    use std::io;
+
     use bytes::{BufMut, BytesMut};
     use mysql_async::{
         OkPacket,
+        binlog::BinlogVersion,
         consts::{CapabilityFlags, StatusFlags},
     };
     use mysql_common::{
+        binlog::BinlogFile,
         packets::{AuthPlugin, HandshakePacket},
         proto::{MySerialize, codec::PacketCodec},
     };
@@ -448,6 +525,33 @@ mod tests {
         // conn.query_drop(
         //     r"select @@server_id",
         // )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn binlog_event_roundtrip() -> io::Result<()> {
+        const PATH: &str = "./test-data/binlogs";
+
+        let binlogs = std::fs::read_dir(PATH)?
+            .filter_map(|path| path.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.file_name().is_some());
+
+        'outer: for file_path in binlogs {
+            let file_data =
+                std::fs::read("/Users/lbk/mysqltest/data/relay-bin/relay-bin.000000001")?;
+            let mut binlog_file = BinlogFile::new(BinlogVersion::Version4, &file_data[..])?;
+
+            while let Some(ev) = binlog_file.next() {
+                let ev = ev?;
+                let _ = dbg!(ev.header().event_type());
+                let binlog_version = ev.fde().binlog_version();
+
+                let mut output = Vec::new();
+                ev.write(binlog_version, &mut output)?;
+            }
+        }
 
         Ok(())
     }

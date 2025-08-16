@@ -8,12 +8,16 @@ lazy_static! {
         vars.push(Variable::new("version_comment".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "MySQL Community Server (GPL)".to_owned()));
         vars.push(Variable::new("server_id".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "1".to_owned()));
         vars.push(Variable::new("server_uuid".to_owned(), VARIABLE_SCOPE_GLOBAL, false, Uuid::new_v4().to_string()));
+        vars.push(Variable::new("binlog_checksum".to_owned(), VARIABLE_SCOPE_GLOBAL, false, Uuid::new_v4().to_string()));
+        vars.push(Variable::new("gtid_mode".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "ON".to_owned()));
+        vars.push(Variable::new(SESSION_CHARSET_KEY_NAME.to_owned(), VARIABLE_SCOPE_SESSION, true, "utf8".to_string()));
         vars
     };
 }
 
 pub const VARIABLE_SCOPE_GLOBAL: u8 = 1;
 pub const VARIABLE_SCOPE_SESSION: u8 = 2;
+pub const SESSION_CHARSET_KEY_NAME: &'static str = "__charset";
 
 #[derive(Debug, Clone)]
 pub struct Variable {

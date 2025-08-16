@@ -1,6 +1,6 @@
 use std::{borrow::Cow, collections::HashMap, io};
 
-use bytes::BufMut;
+use bytes::{BufMut, BytesMut};
 use mysql_async::consts::{CapabilityFlags, MariadbCapabilities, StatusFlags};
 use mysql_common::{
     collations::CollationId,
@@ -711,7 +711,6 @@ impl<'a> MySerialize for OkPacket<'a> {
     }
 }
 
-
 /// Represents MySql's Ok packet.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct OkPacket2<'a> {
@@ -724,7 +723,6 @@ pub struct OkPacket2<'a> {
 
     capabilities: CapabilityFlags,
 }
-
 
 // OK: header = 0 and length of packet >= 7
 // EOF: header = 0xfe and length of packet < 8
@@ -993,53 +991,35 @@ impl MySerialize for ColumnDefinition<'_> {
     }
 }
 
+#[allow(unused)]
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct TextResultsetRow<'a> {
-    _column_count: RawInt<LenEnc>,
-    data: Option<Vec<RawBytes<'a, LenEnc>>>,
+    data: RawBytes<'a, LenEnc>,
 }
 
 impl<'a> TextResultsetRow<'a> {
-    pub fn new(data: Option<Vec<impl Into<Cow<'a, [u8]>>>>) -> Self {
-        let data = if let Some(data_) = data {
-            let mut values = Vec::new();
-            for value in data_ {
-                values.push(RawBytes::new(value));
-            }
-            // values.push(RawBytes::new(0xFB));
-            Some(values)
-        } else {
-            None
-        };
+    pub fn new(data: Option<impl Into<Cow<'a, [u8]>>>) -> Self {
         Self {
-            _column_count: RawInt::new(0),
-            data,
+            data: match data {
+                Some(value) => {
+                    let value = RawBytes::new(value);
+                    value
+                }
+                None => RawBytes::new("".as_bytes()),
+            },
         }
     }
 }
 
 impl MySerialize for TextResultsetRow<'_> {
     fn serialize(&self, buf: &mut Vec<u8>) {
-        // self.column_count.serialize(&mut *buf);
-        match self.data.clone() {
-            Some(data_) => {
-                for value in data_ {
-                    value.serialize(&mut *buf);
-                }
-            }
-            None => {
-                // for _ in 0..*self.column_count {
-                //     buf.push(0xFB);
-                // }
-                buf.push(0xFB);
-            }
-        }
+        self.data.serialize(&mut *buf);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use mysql_common::proto::MySerialize;
+    use mysql_common::{packets::ComBinlogDumpGtid, proto::MySerialize};
 
     use crate::{
         constants::ColumnDefinitionFlags,
@@ -1069,7 +1049,7 @@ mod tests {
 
         // Packet2
 
-        let data = TextResultsetRow::new(Some(["1".as_bytes()].to_vec()));
+        let data = TextResultsetRow::new(Some("1".as_bytes()));
         // println!("data: {:?}", data);
         let mut buffer = Vec::new();
         data.serialize(&mut buffer);
@@ -1089,5 +1069,6 @@ mod tests {
         .serialize(&mut buffer);
 
         println!("buffer: {:?}", buffer);
+
     }
 }
