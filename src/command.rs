@@ -1,12 +1,11 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
-use bytes::BytesMut;
-use chrono::Utc;
+use anyhow::{Result, anyhow};
+use bytes::{BufMut, BytesMut};
+use chrono::{DateTime, Local, Utc};
 use mysql_async::consts::CapabilityFlags;
 use mysql_common::{
     misc::raw::{RawBytes, RawInt, int::LenEnc},
-    packets::OldEofPacket,
     proto::MySerialize,
 };
 use sqlparser::{
@@ -16,10 +15,7 @@ use sqlparser::{
 };
 
 use crate::{
-    constants::ColumnDefinitionFlags,
-    get_server_status,
-    packets::{ColumnDefinition, EofPacket, OkPacket},
-    vars::{SESSION_CHARSET_KEY_NAME, Variable, get_global_var, get_session_var, set_session_var},
+    consts::ColumnDefinitionFlags, get_server_status, packets::{ColumnDefinition, EofPacket, OkPacket}, variable::{get_global_var, get_session_var, set_session_var, Variable, SESSION_CHARSET_KEY_NAME}
 };
 
 // fn unsupport_session(sql: &str, _var: &str) -> Vec<u8> {
@@ -119,14 +115,23 @@ use crate::{
 //     packets
 // }
 
-fn serialize_str<'a>(buffer: &mut BytesMut, text: &'a str) {
-    let mut value = vec![];
-    let data: RawBytes<'a, LenEnc> = RawBytes::new(text.as_bytes());
-    data.serialize(&mut value);
-    buffer.extend_from_slice(&value);
+// NULL is sent as 0xFB
+// everything else is converted to a string and is sent as string<lenenc>
+fn serialize_str<'a>(buffer: &mut BytesMut, text: Option<&'a str>) {
+    match text {
+        Some(s) => {
+            let mut value = vec![];
+            let data: RawBytes<'a, LenEnc> = RawBytes::new(s.as_bytes());
+            data.serialize(&mut value);
+            buffer.extend_from_slice(&value);
+        }
+        None => {
+            buffer.extend_from_slice(&[0xFB]);
+        }
+    }
 }
 
-fn serialize_str2<'a>(text: &'a str) -> BytesMut {
+fn serialize_str2<'a>(text: Option<&'a str>) -> BytesMut {
     let mut buffer = BytesMut::new();
     serialize_str(&mut buffer, text);
     buffer
@@ -207,10 +212,10 @@ pub fn handle_query_select(
             SelectItem::UnnamedExpr(exp) => {
                 let (col, val) = match exp {
                     Expr::Function(func) => {
+                        // 函数
                         let mut col = BytesMut::new();
                         let mut val = BytesMut::new();
-
-                        for part in func.name.0 {
+                        for part in func.name.0.clone() {
                             match part {
                                 sqlparser::ast::ObjectNamePart::Identifier(id) => {
                                     match id.value.to_lowercase().as_str() {
@@ -218,32 +223,42 @@ pub fn handle_query_select(
                                             let now = Utc::now();
                                             let start: SystemTime = now.into();
                                             if let Ok(duration) = start.duration_since(UNIX_EPOCH) {
-                                                // 将 Duration 转换为秒数（Unix 时间戳）
                                                 let unix_timestamp = duration.as_secs();
-                                                // col.extend_from_slice(&id.value.as_bytes());
-                                                // val.put_u64(unix_timestamp);
                                                 serialize_str(
                                                     &mut val,
-                                                    &format!("{unix_timestamp}"),
+                                                    Some(&format!("{unix_timestamp}")),
                                                 );
-
-                                                // let mut column_data = vec![];
-                                                // ColumnDefinition::new(
-                                                //     &[],
-                                                //     &[],
-                                                //     &[],
-                                                //     format!("{}()", id.value).as_bytes(),
-                                                //     &[],
-                                                //     63,
-                                                //     val.len() as u32,
-                                                //     8,
-                                                //     ColumnDefinitionFlags::BINARY_FLAG as u16,
-                                                //     0,
-                                                // )
-                                                // .serialize(&mut column_data);
-                                                // col.extend_from_slice(&column_data);
                                                 serialize_col(&mut col, &format!("{}()", id.value));
                                             }
+                                        }
+                                        "current_timestamp" => {
+                                            //
+                                            let now: DateTime<Local> = Local::now();
+                                            let formatted_time =
+                                                now.format("%Y-%m-%d %H:%M:%S").to_string();
+                                            serialize_str(&mut val, Some(&formatted_time));
+                                            serialize_col(&mut col, &format!("{}", id.value));
+                                        }
+                                        "now" => {
+                                            //
+                                            let now: DateTime<Local> = Local::now();
+                                            let formatted_time =
+                                                now.format("%Y-%m-%d %H:%M:%S").to_string();
+                                            serialize_str(&mut val, Some(&formatted_time));
+                                            serialize_col(&mut col, &format!("{}()", id.value));
+                                        }
+                                        "binlog_gtid_pos" => {
+                                            // Mariadb专用函数，暂不支持，直接返回空
+                                            // SELECT binlog_gtid_pos('mysql-bin.000001',328)
+                                            let mut arg_values: Vec<String> =
+                                                get_fun_args(&func.clone());
+                                            let filename = arg_values.remove(0);
+                                            let pos = arg_values.remove(0);
+                                            serialize_col(
+                                                &mut col,
+                                                &format!("{}('{}',{})", id.value, filename, pos),
+                                            );
+                                            serialize_str(&mut val, Some(""));
                                         }
                                         _ => {}
                                     }
@@ -256,30 +271,20 @@ pub fn handle_query_select(
                     Expr::Identifier(id) => {
                         let name = id.value;
                         if name.starts_with("@") {
-                            // let mut data = vec![];
-                            // data.extend_from_slice(name.as_bytes());
-                            let var = get_session_var(session_vars, &name)?;
-                            // let mut value = BytesMut::new();
-                            // value.extend_from_slice(var.value().as_bytes());
-
-                            // let mut column_data = vec![];
-                            // let mut column_data_mut = BytesMut::new();
-                            // ColumnDefinition::new(
-                            //     &[],
-                            //     &[],
-                            //     &[],
-                            //     data,
-                            //     &[],
-                            //     63,
-                            //     var.value().len() as u32,
-                            //     8,
-                            //     ColumnDefinitionFlags::BINARY_FLAG as u16,
-                            //     0,
-                            // )
-                            // .serialize(&mut column_data);
-                            // column_data_mut.extend_from_slice(&column_data);
-                            // serialize_col2(&name);
-                            (serialize_col2(&name), serialize_str2(var.value()))
+                            let val = match get_session_var(session_vars, &name) {
+                                Ok(var) => serialize_str2(Some(var.value())),
+                                Err(e) => {
+                                    if name.starts_with("@@") {
+                                        return Err(anyhow!("{e}"));
+                                    } else if name.starts_with("@") {
+                                        // 用户定义变量，直接返回NULL
+                                        serialize_str2(None)
+                                    } else {
+                                        return Err(anyhow!("{e}"));
+                                    }
+                                }
+                            };
+                            (serialize_col2(&name), val)
                         } else {
                             (BytesMut::new(), BytesMut::new())
                         }
@@ -288,60 +293,11 @@ pub fn handle_query_select(
                         // a.b
                         let (var, name) = get_var(session_vars, cid)?;
                         let value = match var {
-                            Some(v) => serialize_str2(v.value()),
+                            Some(v) => serialize_str2(Some(v.value())),
                             None => BytesMut::new(),
                         };
-
-                        // let mut data = vec![];
-                        // data.extend_from_slice(name.as_bytes());
-                        // let mut column_data = vec![];
-                        // let mut column_data_mut = serialize_col2(&name);
-
                         (serialize_col2(&name), value)
                     }
-                    // Expr::BinaryOp { left: _, op: _, right: _ } => {
-                    // match *left {
-                    //     Expr::Identifier(id) => {
-                    //         if id.value.starts_with("@@") {
-                    //             if op == BinaryOperator::Eq {
-                    //                 match *right {
-                    //                     Expr::Value(v) => {
-                    //                         session_vars.insert(id.value, v.value.to_string());
-                    //                         buffer.extend_from_slice(&session_var_setup());
-                    //                     }
-                    //                     _ => {}
-                    //                 }
-                    //             }
-                    //         }
-                    //     }
-                    //     Expr::CompoundIdentifier(cid) => {
-                    //         let mut key = String::new();
-                    //         for val in cid {
-                    //             if key.len() > 0 {
-                    //                 key.push_str(".");
-                    //             }
-                    //             key.push_str(&val.value);
-                    //         }
-
-                    //         if op == BinaryOperator::Eq {
-                    //             match *right {
-                    //                 Expr::Value(v) => {
-                    //                     if key.starts_with("@@global.") {
-                    //                         buffer
-                    //                             .extend_from_slice(&global_var_read_only(&key));
-                    //                     } else if key.starts_with("@@session.") {
-                    //                         session_vars.insert(key, v.value.to_string());
-                    //                         buffer.extend_from_slice(&session_var_setup());
-                    //                     }
-                    //                 }
-                    //                 _ => {}
-                    //             }
-                    //         }
-                    //     }
-                    //     _ => {}
-                    // }
-                    // (BytesMut::new(), BytesMut::new())
-                    // }
                     _ => (BytesMut::new(), BytesMut::new()),
                 };
 
@@ -357,6 +313,40 @@ pub fn handle_query_select(
         vec![column_values],
         client_capabilities,
     ))
+}
+
+// 获取函数的参数值
+fn get_fun_args(func: &sqlparser::ast::Function) -> Vec<String> {
+    let mut arg_values: Vec<String> = vec![];
+    match func.args.clone() {
+        sqlparser::ast::FunctionArguments::List(list) => {
+            for arg in list.args {
+                match arg {
+                    sqlparser::ast::FunctionArg::Unnamed(fexp) => match fexp {
+                        sqlparser::ast::FunctionArgExpr::Expr(exp) => match exp {
+                            Expr::Value(v) => match v.value {
+                                sqlparser::ast::Value::Number(val, _) => {
+                                    arg_values.push(val);
+                                }
+                                sqlparser::ast::Value::SingleQuotedString(val) => {
+                                    arg_values.push(val);
+                                }
+                                sqlparser::ast::Value::DoubleQuotedString(val) => {
+                                    arg_values.push(val);
+                                }
+                                _ => {}
+                            },
+                            _ => {}
+                        },
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    arg_values
 }
 
 fn build_packet(
@@ -609,8 +599,8 @@ pub fn handle_command_query(
                         column_definitions.push(serialize_col2("Value"));
 
                         let var = get_session_var(session_vars, &v)?;
-                        column_values.push(serialize_str2(&var.name()));
-                        column_values.push(serialize_str2(&var.value()));
+                        column_values.push(serialize_str2(Some(&var.name())));
+                        column_values.push(serialize_str2(Some(&var.value())));
 
                         return Ok(build_packet(
                             column_definitions,
@@ -633,8 +623,8 @@ pub fn handle_command_query(
                             continue;
                         }
                         let mut column_values: Vec<BytesMut> = vec![];
-                        column_values.push(serialize_str2(&var.name()));
-                        column_values.push(serialize_str2(&var.value()));
+                        column_values.push(serialize_str2(Some(&var.name())));
+                        column_values.push(serialize_str2(Some(&var.value())));
                         rows.push(column_values);
                     }
 

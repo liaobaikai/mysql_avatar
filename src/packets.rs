@@ -1035,9 +1035,7 @@ mod tests {
     use mysql_common::{packets::ComBinlogDumpGtid, proto::MySerialize};
 
     use crate::{
-        constants::ColumnDefinitionFlags,
-         get_server_status,
-        packets::{ColumnDefinition, OkPacket, TextResultsetRow},
+         consts::ColumnDefinitionFlags, get_server_status, packets::{ColumnDefinition, OkPacket, TextResultsetRow}
     };
 
     fn get_capabilities() -> CapabilityFlags {

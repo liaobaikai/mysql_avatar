@@ -20,6 +20,9 @@
                 }
             },
             "args": [],
+            "env": {
+                "RELAYLOG_INDEX":"C:\\Users\\BK-liao\\Desktop\\mysql-semi-test\\data\\binlog\\mysql-bin.index"
+            },
             "cwd": "${workspaceFolder}"
         },
         {
@@ -37,6 +40,9 @@
                     "name": "mysql_avatar",
                     "kind": "bin"
                 }
+            },
+            "env": {
+                "RELAYLOG_INDEX":"C:\\Users\\BK-liao\\Desktop\\mysql-semi-test\\data\\binlog\\mysql-bin.index"
             },
             "args": [],
             "cwd": "${workspaceFolder}"
