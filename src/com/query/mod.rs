@@ -127,25 +127,6 @@ impl Queryable for SqlCommand {
                         println!("select: {:?}", s);
                         return self.select(*s);
                     }
-                    // Statement::Set(s) => {
-                    //     return self.set(s);
-                    // println!("set: {:?}", s);
-                    // handle_command_set(s, session_vars, client_capabilities)?;
-
-                    // let mut data = vec![];
-                    // OkPacket::new(
-                    //     0,
-                    //     0,
-                    //     get_server_status(),
-                    //     0,
-                    //     String::new().as_bytes(),
-                    //     String::new().as_bytes(),
-                    //     self.client_capabilities,
-                    //     false,
-                    // )
-                    // .serialize(&mut data);
-                    // buf.extend_from_slice(&data);
-                    // }
                     _ => {}
                 },
 

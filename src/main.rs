@@ -1,36 +1,5 @@
-use std::{
-    fs::File,
-    io::{BufReader, Read, Seek, SeekFrom},
-    path::Path,
-    thread,
-    time::Duration,
-};
+use anyhow::Result;
 
-use anyhow::{Result, anyhow};
-use bytes::{Buf, BufMut, BytesMut};
-use chrono::{DateTime, Local};
-use mysql_async::{
-    binlog::BinlogVersion,
-    consts::{CapabilityFlags, StatusFlags},
-};
-use mysql_common::{
-    binlog::{BinlogFile, BinlogFileHeader},
-    io::ParseBuf,
-    packets::SqlState,
-    proto::{MyDeserialize, MySerialize, codec::PacketCodec},
-};
-
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-};
-
-use crate::{
-    auth::handshake::Handshake,
-    com::SqlCommand,
-    packets::{ErrPacket, HandshakeResponse, OkPacket, ServerError},
-    variable::{SYSVARS, Variable},
-};
 mod auth;
 mod com;
 mod consts;
@@ -46,7 +15,7 @@ mod mysqld;
 // // 默认语言
 // const SERVER_LANGUAGE: u8 = 8;
 // 缓冲区大小
-const READ_BUFFER_SIZE: usize = 0xFFFF;
+// const READ_BUFFER_SIZE: usize = 0xFFFF;
 
 // #[inline]
 // fn server_def_capabilities() -> CapabilityFlags {

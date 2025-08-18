@@ -45,6 +45,7 @@ pub struct Handshake {
     client_capabilities: CapabilityFlags,
 }
 
+
 impl Handshake {
     pub fn new() -> Self {
         let mut conn_id = USER_CONN_ID.0.lock();
@@ -60,6 +61,7 @@ impl Handshake {
         &self.scramble.data
     }
 
+    #[allow(unused)]
     pub fn client_capabilities(&self) -> &CapabilityFlags {
         &self.client_capabilities
     }

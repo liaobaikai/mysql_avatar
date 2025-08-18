@@ -30,11 +30,8 @@ pub trait Queryable {
     ) -> Vec<BytesMut>;
 }
 
-trait Dumpable {
-
-
-
-}
+#[allow(unused)]
+trait Dumpable {}
 
 #[derive(Debug, Default)]
 pub struct KvPair {
@@ -63,6 +60,7 @@ impl SqlCommand {
         }
     }
 
+    #[allow(unused)]
     pub fn set_client_capabilities(&mut self, client_capabilities: CapabilityFlags) {
         self.client_capabilities.insert(client_capabilities);
     }
