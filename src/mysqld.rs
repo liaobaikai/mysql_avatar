@@ -13,7 +13,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     select,
-    sync::{broadcast, mpsc},
+    sync::{broadcast, mpsc, watch},
 };
 use tokio_stream::{StreamExt, wrappers::UnboundedReceiverStream};
 
@@ -59,36 +59,20 @@ pub async fn init_server(port: u16) -> Result<()> {
     // 启动另一个线程，监控binlog日志是否有变化，主要是判断大小与relaylog文件大小
     // 如果有变化，通过另一个消息通道通知读取并往stream发送。
     // 如果没有变化，则继续等待。
-    let (tx, _) = broadcast::channel(0xFFFF);
-
-    let daemon_tx = tx.clone();
-    tokio::spawn(async move {
-        let mut stream = daemon_tx.subscribe();
-        // 只是保持接收者活跃，不做实际处理
-        loop {
-            if let Err(e) = stream.recv().await {
-                println!("e: {e}");
-                // 通道真正关闭时退出
-                break;
-            }
-        }
-        println!("守护接收者: 通道已关闭");
-    });
-
-    // 启动一个专门用于发送广播消息的任务
+    let (tx, mut rx) = watch::channel("");
     let cloned_tx = tx.clone();
     tokio::spawn(async move {
-        // let mut intv =
-        //     tokio::time::interval_at(tokio::time::Instant::now() + START_AFTER, INTERVAL);
-        // let start_secs = START_AFTER.as_secs();
-        // let intv_secs = START_AFTER.as_secs();
+        let mut intv =
+            tokio::time::interval_at(tokio::time::Instant::now() + START_AFTER, INTERVAL);
+        let start_secs = START_AFTER.as_secs();
+        let intv_secs = START_AFTER.as_secs();
         log::info!(
-            "Binlog watcher inited..."
+            "Binlog watcher inited, start after {start_secs} secs, running every {intv_secs} secs"
         );
 
-        let mut reader: MyBinlogFileReader;
+        // let mut reader: MyBinlogFileReader;
         loop {
-            // select! {
+            select! {
             //     // _ = cloned_token.cancelled() => {
             //     //     log::info!("Sender#{server_id} cancelled");
             //     //     take_back_from_scratch(None);
@@ -97,26 +81,29 @@ pub async fn init_server(port: u16) -> Result<()> {
             //     // Some(v) = rx.next() => {
 
             //     // },
-            //     _ = intv.tick() => {
+                _ = intv.tick() => {
                     println!("intv.tick =====");
                     // 发送日志
-                    reader = MyBinlogFileReader::try_from(Path::new("/Users/lbk/mysqltest/data/relay-bin/relay-bin.000000001")).unwrap();
-                    reader.read_all_fn(0, |ev: Event| {
-                        if let Err(e) = cloned_tx.send(ev) {
-                            log::error!("send: {e}")
-                        }
-                        Ok(())
-                    }).await.unwrap();
+                    // reader = MyBinlogFileReader::try_from(Path::new("/Users/lbk/mysqltest/data/relay-bin/relay-bin.000000001")).unwrap();
+                    // reader.read_all_fn(0, |ev: Event| {
+                        // if let Err(e) = cloned_tx.send(ev) {
+                        //     log::error!("send: {e}")
+                        // }
+                        // Ok(())
+                    // }).await.unwrap();
+                    cloned_tx.send("").unwrap();
+                    // 一直监控relaylog文件，以及最后一个文件的大小，如果有变化，则发送通知，让子线程更新状态
+                    
 
                     log::debug!("intv.tick ...");
-                // }
-            // }
+                }
+            }
             tokio::time::sleep(INTERVAL).await;
         }
     });
 
     loop {
-        let mut rx = tx.subscribe();
+        let mut cloned_rx = rx.clone();
         let (mut socket, _) = listener.accept().await?;
         tokio::spawn(async move {
             let mut handshake = Handshake::new();
@@ -142,11 +129,15 @@ pub async fn init_server(port: u16) -> Result<()> {
                         handle_write(&mut socket, &mut packet_codec, &mut handshake, &mut phase, &mut sql_command).await.unwrap();
                     }
 
-                    // 定时发送过来的
-                    Ok(event) = rx.recv() => {
-                        // 如何通知我要取哪些日志？
-                        log::debug!("recv>>>>>>event: {:?}", event);
+                    Ok(_) = cloned_rx.changed() => {
+                        log::debug!("cloned_rx.changed: {:?}", *cloned_rx.borrow_and_update());
                     }
+
+                    // 定时发送过来的
+                    // Ok(event) = rx.recv() => {
+                    //     // 如何通知我要取哪些日志？
+                    //     log::debug!("recv>>>>>>event: {:?}", event);
+                    // }
                 }
             }
         });
