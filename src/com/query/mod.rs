@@ -13,15 +13,19 @@ use sqlparser::{
 
 use crate::{
     com::{
-        query::{
+        ok_packet, query::{
             query_select_func::{
                 binlog_gtid_pos, current_timestamp, query_fn_name, unix_timestamp_string,
             },
             query_set::{get_var_setting_key, get_var_setting_value},
         }, KvPair, Queryable, SqlCommand
-    }, consts::{Charset, ColumnDefinitionFlags}, mysqld::server_status_flags, packets::{ColumnDefinition, EofPacket, OkPacket}, variable::{
+    },
+    consts::{Charset, ColumnDefinitionFlags},
+    mysqld::server_status_flags,
+    packets::{ColumnDefinition, EofPacket, OkPacket},
+    variable::{
         get_global_var, get_session_var, set_session_var, Variable, SESSION_CHARSET_KEY_NAME, SYSVARS
-    }
+    },
 };
 
 pub mod query_select_func;
@@ -68,7 +72,7 @@ pub fn serialize_col(buffer: &mut BytesMut, col_name: &str) {
         &[],
         Charset::LATIN1_SWEDISH_CI as u16,
         0,
-        ColumnType::MYSQL_TYPE_STRING as u8,  // 如果需要右对齐，可以用 8: LONGLONG
+        ColumnType::MYSQL_TYPE_STRING as u8, // 如果需要右对齐，可以用 8: LONGLONG
         ColumnDefinitionFlags::BINARY_FLAG as u16,
         0,
     )
@@ -249,7 +253,22 @@ impl Queryable for SqlCommand {
             _ => {}
         }
 
-        Ok(vec![])
+        // let mut buf = BytesMut::new();
+        // let mut data = vec![];
+        // OkPacket::new(
+        //     0,
+        //     0,
+        //     server_status_flags(),
+        //     0,
+        //     String::new().as_bytes(),
+        //     String::new().as_bytes(),
+        //     self.client_capabilities,
+        //     false,
+        // )
+        // .serialize(&mut data);
+        // buf.extend_from_slice(&data);
+
+        Ok(vec![ok_packet(self.client_capabilities, false)])
     }
 
     fn show(

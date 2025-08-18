@@ -4,10 +4,11 @@ use mysql_async::consts::CapabilityFlags;
 use mysql_common::{
     io::ParseBuf,
     misc::raw::{RawBytes, RawInt, bytes::EofBytes},
+    proto::MySerialize,
 };
 use sqlparser::ast::{Function, Select, Set, ShowStatementFilter};
 
-use crate::{consts::Command, variable::Variable};
+use crate::{consts::Command, mysqld::server_status_flags, packets::OkPacket, variable::Variable};
 
 pub mod binlog;
 pub mod query;
@@ -60,7 +61,6 @@ impl SqlCommand {
         }
     }
 
-    #[allow(unused)]
     pub fn set_client_capabilities(&mut self, client_capabilities: CapabilityFlags) {
         self.client_capabilities.insert(client_capabilities);
     }
@@ -80,12 +80,27 @@ impl SqlCommand {
                 return Err(anyhow!("Connection closed"));
             }
             Command::COM_REGISTER_SLAVE => {}
-            Command::COM_BINLOG_DUMP | Command::COM_BINLOG_DUMP_GTID => {
-                return Ok(vec![]);
-            }
             _ => {}
         }
 
-        Ok(vec![])
+        Ok(vec![ok_packet(self.client_capabilities, false)])
     }
+}
+
+pub fn ok_packet(client_capabilities: CapabilityFlags, is_eof: bool) -> BytesMut {
+    let mut buf = BytesMut::new();
+    let mut data = vec![];
+    OkPacket::new(
+        0,
+        0,
+        server_status_flags(),
+        0,
+        String::new().as_bytes(),
+        String::new().as_bytes(),
+        client_capabilities,
+        is_eof,
+    )
+    .serialize(&mut data);
+    buf.extend_from_slice(&data);
+    buf
 }

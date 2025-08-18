@@ -32,7 +32,8 @@
             "cargo": {
                 "args": [
                     "test",
-                    "--no-run",
+                    "--nocapture",
+                    "--show-output",
                     "--bin=mysql_avatar",
                     "--package=mysql_avatar"
                 ],
