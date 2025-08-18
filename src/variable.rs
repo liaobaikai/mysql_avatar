@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 pub const VARIABLE_PROTOCOL_VERSION: u8 = 10;
 pub const VARIABLE_VERSION: &str = "8.0.43";
-pub const VARIABLE_DEFAULT_AUTHENTICATION_PLUGIN: &str = "mysql_native_password";
+pub const VARIABLE_DEFAULT_AUTHENTICATION_PLUGIN: &str = "default_authentication_plugin";
 
 lazy_static! {
     pub static ref SYSVARS: Vec<Variable> = {
@@ -19,7 +19,7 @@ lazy_static! {
         vars.push(Variable::new("gtid_mode".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "ON".to_owned()));
         vars.push(Variable::new("rpl_semi_sync_master_enabled".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "0".to_owned()));
         
-        vars.push(Variable::new("default_authentication_plugin".to_owned(), VARIABLE_SCOPE_GLOBAL, false, VARIABLE_DEFAULT_AUTHENTICATION_PLUGIN.to_owned()));
+        vars.push(Variable::new("default_authentication_plugin".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "mysql_native_password".to_owned()));
 
         vars.push(Variable::new(SESSION_CHARSET_KEY_NAME.to_owned(), VARIABLE_SCOPE_SESSION, true, "utf8".to_string()));
         vars

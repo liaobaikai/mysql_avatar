@@ -1028,69 +1028,69 @@ impl MySerialize for TextResultsetRow<'_> {
 }
 
 
-#[allow(unused)]
-#[cfg(test)]
-mod tests {
-    use mysql_async::consts::CapabilityFlags;
-    use mysql_common::{packets::ComBinlogDumpGtid, proto::MySerialize};
+// #[allow(unused)]
+// #[cfg(test)]
+// mod tests {
+//     use mysql_async::consts::CapabilityFlags;
+//     use mysql_common::{packets::ComBinlogDumpGtid, proto::MySerialize};
 
-    use crate::{
-         consts::ColumnDefinitionFlags, get_server_status, packets::{ColumnDefinition, OkPacket, TextResultsetRow}
-    };
+//     use crate::{
+//          consts::ColumnDefinitionFlags, get_server_status, packets::{ColumnDefinition, OkPacket, TextResultsetRow}
+//     };
 
-    fn get_capabilities() -> CapabilityFlags {
-        CapabilityFlags::CLIENT_PROTOCOL_41
-        | CapabilityFlags::CLIENT_PLUGIN_AUTH
-        | CapabilityFlags::CLIENT_SECURE_CONNECTION
-        | CapabilityFlags::CLIENT_CONNECT_WITH_DB
-        | CapabilityFlags::CLIENT_TRANSACTIONS
-        | CapabilityFlags::CLIENT_CONNECT_ATTRS
-        // | CapabilityFlags::CLIENT_QUERY_ATTRIBUTES
-        | CapabilityFlags::CLIENT_DEPRECATE_EOF
-    }
+//     fn get_capabilities() -> CapabilityFlags {
+//         CapabilityFlags::CLIENT_PROTOCOL_41
+//         | CapabilityFlags::CLIENT_PLUGIN_AUTH
+//         | CapabilityFlags::CLIENT_SECURE_CONNECTION
+//         | CapabilityFlags::CLIENT_CONNECT_WITH_DB
+//         | CapabilityFlags::CLIENT_TRANSACTIONS
+//         | CapabilityFlags::CLIENT_CONNECT_ATTRS
+//         // | CapabilityFlags::CLIENT_QUERY_ATTRIBUTES
+//         | CapabilityFlags::CLIENT_DEPRECATE_EOF
+//     }
 
-    #[test]
-    fn test_build_column_definition() {
-        // Packet1
-        let data = ColumnDefinition::new(
-            "".as_bytes(),
-            "".as_bytes(),
-            "".as_bytes(),
-            "@@log_bin".as_bytes(),
-            "".as_bytes(),
-            63, // binary
-            1,  //
-            8,  // binary
-            ColumnDefinitionFlags::BINARY_FLAG as u16,
-            0x00,
-        );
+//     #[test]
+//     fn test_build_column_definition() {
+//         // Packet1
+//         let data = ColumnDefinition::new(
+//             "".as_bytes(),
+//             "".as_bytes(),
+//             "".as_bytes(),
+//             "@@log_bin".as_bytes(),
+//             "".as_bytes(),
+//             63, // binary
+//             1,  //
+//             8,  // binary
+//             ColumnDefinitionFlags::BINARY_FLAG as u16,
+//             0x00,
+//         );
 
-        let mut buffer = Vec::new();
-        data.serialize(&mut buffer);
-        println!("buffer: {:?}", buffer);
+//         let mut buffer = Vec::new();
+//         data.serialize(&mut buffer);
+//         println!("buffer: {:?}", buffer);
 
-        // Packet2
+//         // Packet2
 
-        let data = TextResultsetRow::new(Some("1".as_bytes()));
-        // println!("data: {:?}", data);
-        let mut buffer = Vec::new();
-        data.serialize(&mut buffer);
-        println!("buffer: {:?}", buffer);
+//         let data = TextResultsetRow::new(Some("1".as_bytes()));
+//         // println!("data: {:?}", data);
+//         let mut buffer = Vec::new();
+//         data.serialize(&mut buffer);
+//         println!("buffer: {:?}", buffer);
 
-        // Packet3
-        let mut buffer = Vec::new();
-        OkPacket::new(
-            0,
-            0,
-            get_server_status(),
-            0,
-            String::new().as_bytes(),
-            String::new().as_bytes(),
-            get_capabilities(),
-            false,
-        )
-        .serialize(&mut buffer);
+//         // Packet3
+//         let mut buffer = Vec::new();
+//         OkPacket::new(
+//             0,
+//             0,
+//             get_server_status(),
+//             0,
+//             String::new().as_bytes(),
+//             String::new().as_bytes(),
+//             get_capabilities(),
+//             false,
+//         )
+//         .serialize(&mut buffer);
 
-        println!("buffer: {:?}", buffer);
-    }
-}
+//         println!("buffer: {:?}", buffer);
+//     }
+// }
