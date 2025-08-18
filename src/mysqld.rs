@@ -151,7 +151,7 @@ async fn read_from_stream(
             // 回复客户端
             net_write(stream, packet_codec, &mut data).await?;
         }
-        ConnectionLifecycle::ConnectionPhaseAuthenticationResponse => {
+        ConnectionLifecycle::ConnectionPhaseAuthenticationResponse | ConnectionLifecycle::CommandPhase => {
             // 是否收到其他命令
             let mut data = sql_command.read(&mut buffer)?;
             loop {
