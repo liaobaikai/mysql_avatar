@@ -12,7 +12,8 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     select,
-    sync::watch, time::timeout,
+    sync::watch,
+    time::timeout,
 };
 
 use crate::{
@@ -144,6 +145,8 @@ pub async fn init_server(port: u16) -> Result<()> {
             let mut binlog_index =
                 BinlogIndex::try_from(cloned_relay_log_index_path.to_path_buf()).unwrap();
             let mut binlog_reader = MyBinlogFileReader::default();
+            let mut buffer = handshake.init_plain_packet();
+            
             loop {
                 select! {
                     Ok(_) = cloned_rx.changed() => {
@@ -155,18 +158,24 @@ pub async fn init_server(port: u16) -> Result<()> {
 
                     Ok(_) = socket.readable() => {
                         // 可以读数据
-                        if let Err(e) = handle_read(&mut socket, &mut packet_codec, &mut handshake, &mut phase, &mut sql_command, &mut binlog_index, &mut binlog_reader).await {
-                            log::debug!("Read data failed, {:?}", e);
+                        match handle_read(&mut socket, &mut packet_codec, &mut handshake, &mut phase, &mut sql_command, &mut binlog_index, &mut binlog_reader).await {
+                            Ok(data) => {
+                                buffer.extend_from_slice(&data);
+                            },
+                            Err(e) => {
+                                log::debug!("Read data failed, {:?}", e);
+                            }
                         }
+                        // if let Err(e) =  {
+                        //     log::debug!("Read data failed, {:?}", e);
+                        // }
                         log::debug!("socket.readable...");
                     }
-                    Ok(_) = socket.writable() => {
+                    Ok(_) = socket.writable(), if !buffer.is_empty() => {
                         // 可以写数据
-                        handle_write(&mut socket, &mut packet_codec, &mut handshake, &mut phase, &mut sql_command).await.unwrap();
+                        handle_write(&mut buffer, &mut socket, &mut packet_codec, &mut handshake, &mut phase, &mut sql_command).await.unwrap();
                         log::debug!("socket.writable...");
                     }
-
-                    
 
                 }
             }
@@ -200,6 +209,7 @@ async fn handle_binlog_changed(
 
 // 写数据
 async fn handle_write(
+    buffer: &mut BytesMut,
     stream: &mut TcpStream,
     packet_codec: &mut PacketCodec,
     handshake: &mut Handshake,
@@ -212,7 +222,11 @@ async fn handle_write(
             net_write(stream, packet_codec, &mut packet).await?;
             *phase = ConnectionLifecycle::ConnectionPhaseInitialHandshakeResponse;
         }
-        _ => {}
+        _ => {
+            log::debug!("net_write...");
+            net_write(stream, packet_codec, buffer).await?;
+            buffer.clear();
+        }
     }
 
     Ok(())
@@ -225,13 +239,14 @@ pub async fn net_write(
     src: &mut BytesMut,
 ) -> Result<()> {
     // println!("net_write: {:?}", src);
-    let mut buffer = BytesMut::with_capacity(src.len() + 4);
-    packet_codec.encode(src, &mut buffer).unwrap();
-    println!("buffer: {:?}", buffer);
-    if let Err(e) = stream.write_all(&buffer).await {
+    let mut dst = BytesMut::with_capacity(src.len() + 4);
+    packet_codec.encode(src, &mut dst).unwrap();
+    println!("dst: {:?}", dst);
+    if let Err(e) = stream.write_all(&dst).await {
         return Err(anyhow!("failed to write to stream; err = {:?}", e));
     }
     stream.flush().await.unwrap();
+    src.clear();
     Ok(())
 }
 
@@ -264,44 +279,52 @@ async fn handle_read(
     sql_command: &mut SqlCommand,
     binlog_index: &mut BinlogIndex,
     binlog_reader: &mut MyBinlogFileReader,
-) -> Result<()> {
+) -> Result<BytesMut> {
     let mut src = net_read(stream).await?;
-    let mut buffer = BytesMut::with_capacity(src.len() - 4);
+    let mut dst = BytesMut::with_capacity(src.len() - 4);
+
     println!("recv:buffer:src:{:?}", src);
-    packet_codec.decode(&mut src, &mut buffer).unwrap();
-    println!("recv:buffer:{:?}", buffer);
-    println!("recv:buffer:vec:{:?}", buffer.to_vec());
+    packet_codec.decode(&mut src, &mut dst).unwrap();
+    // buffer.extend_from_slice(&dst);
+
+    // println!("recv:buffer:{:?}", buffer);
+    // println!("recv:buffer:vec:{:?}", buffer.to_vec());
 
     match phase {
         ConnectionLifecycle::ConnectionPhaseInitialHandshakeResponse => {
             // 验证密码
-            let (varify_pass, mut data) = handshake.auth_with_response(&mut buffer)?;
+            let (varify_pass, mut data) = handshake.auth_with_response(&mut dst)?;
             if varify_pass {
                 // 验证通过
                 *phase = ConnectionLifecycle::ConnectionPhaseAuthenticationResponse;
             }
             sql_command.set_client_capabilities(*handshake.client_capabilities());
+            //
             // 回复客户端
-            net_write(stream, packet_codec, &mut data).await?;
+            // buffer.clear();
+            // buffer.extend_from_slice(&data);
+            // net_write(stream, packet_codec, &mut data).await?;
+
+            return Ok(data);
         }
         ConnectionLifecycle::ConnectionPhaseAuthenticationResponse
         | ConnectionLifecycle::CommandPhase => {
             // 是否收到其他命令
-            if let Some(com) = match_binlog_command(&mut buffer)? {
+            if let Some(com) = match_binlog_command(&mut dst)? {
+                *phase = ConnectionLifecycle::CommandBinlogDumpPhase;
                 handle_binlog_command(
                     stream,
                     packet_codec,
                     com,
-                    &mut buffer,
+                    &mut dst,
                     binlog_index,
                     binlog_reader,
                 )
                 .await?;
-                *phase = ConnectionLifecycle::CommandBinlogDumpPhase;
-                return Ok(());
+                return Ok(BytesMut::new());
             }
 
-            let mut data = sql_command.read(&mut buffer)?;
+            let mut data = sql_command.read(&mut dst)?;
             loop {
                 if data.is_empty() {
                     break;
@@ -313,7 +336,7 @@ async fn handle_read(
         }
         _ => {}
     }
-    Ok(())
+    Ok(BytesMut::new())
 }
 
 async fn handle_binlog_command(
