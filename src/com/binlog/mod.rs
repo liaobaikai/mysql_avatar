@@ -13,24 +13,25 @@ use mysql_async::binlog::{BinlogVersion, events::Event};
 use mysql_common::binlog::{BinlogFileHeader, EventStreamReader};
 use mysql_common::io::ParseBuf;
 use mysql_common::misc::raw::RawInt;
-use mysql_common::proto::codec::PacketCodec;
-use tokio::net::TcpStream;
-
 use crate::consts::Command;
-use crate::mysqld::net_write;
 pub mod index;
 
 #[allow(unused)]
 #[derive(Debug, Clone, Default)]
-pub struct BinlogPos {
+pub struct BinlogState {
     pub filename: String,
     pub pos: u64,
+    pub ack: bool,
 }
 
 #[allow(unused)]
-impl<'a> BinlogPos {
-    pub fn new(filename: String, pos: u64) -> Self {
-        BinlogPos { filename, pos: pos }
+impl<'a> BinlogState {
+    pub fn new(filename: String, pos: u64, ack: bool) -> Self {
+        BinlogState { filename, pos, ack }
+    }
+
+    pub fn set_filename_pos(filename: String, pos: u64) {
+
     }
 }
 
@@ -46,13 +47,22 @@ pub fn match_binlog_command(input: &mut BytesMut) -> Result<Option<Command>> {
     }
 }
 
-pub fn event_to_bytes(event: Event) -> BytesMut {
+pub fn event_to_bytes(event: Event, rpl_semi_sync_master_enabled: bool, need_ack: bool) -> BytesMut {
     let mut output = Vec::new();
     event
         .write(mysql_async::binlog::BinlogVersion::Version4, &mut output)
         .unwrap();
     let mut src = BytesMut::new();
     src.put_u8(0x00);
+    if rpl_semi_sync_master_enabled {
+        src.put_u8(0xef);  // 魔术字符
+        if need_ack {
+            src.put_u8(0x01);  // 是否需要回復ack
+        } else {
+            src.put_u8(0x00);
+        }
+    }
+    
     src.extend_from_slice(&output);
     src
 }
@@ -117,14 +127,17 @@ pub struct MyBinlogFileReader {
     // 当前读到文件的哪个位置
     offset: u64,
     filename: PathBuf,
+    // binlog位点
+    pos: u64,
 }
 
 #[allow(unused)]
 impl<'a> MyBinlogFileReader {
     pub fn new() -> Self {
-        Self { offset: 0, filename: PathBuf::new() }
+        Self { offset: 0, filename: PathBuf::new(), pos: 0 }
     }
 
+    // 可以设置当前文件，用于文件切换
     pub fn with_filename(&mut self, filename: PathBuf) -> Result<()> {
         if self.filename == filename {
             return Ok(());
@@ -142,6 +155,15 @@ impl<'a> MyBinlogFileReader {
         self.filename.clone()
     }
 
+    // 可以设置当前的位点，用于ack检查
+    pub fn with_pos(&mut self, pos: u64) {
+        self.pos = pos;
+    }
+
+    pub fn pos(&self) -> u64 {
+        self.pos
+    }
+
     // 如果文件不存在，则直接报错
     pub fn try_from(filename: PathBuf) -> Result<Self> {
         if let Err(e) = File::open(&filename) {
@@ -150,6 +172,7 @@ impl<'a> MyBinlogFileReader {
 
         Ok(Self {
             offset: 0,
+            pos: 0,
             filename,
         })
     }
@@ -187,29 +210,36 @@ impl<'a> MyBinlogFileReader {
         Ok(())
     }
 
-    pub async fn read_all_to_stream(
-        &mut self,
-        skip_pos: u32,
-        stream: &mut TcpStream,
-        packet_codec: &mut PacketCodec,
-    ) -> Result<()> {
-        let file = File::open(&self.filename)?;
+    // pub async fn read_all_to_stream(
+    //     &mut self,
+    //     skip_pos: u32,
+    //     stream: &mut TcpStream,
+    //     packet_codec: &mut PacketCodec,
+    // ) -> Result<()> {
+        
+    //     while let Some(event) = binlog_file.next() {
+    //         let event = event?;
+    //         if event.header().log_pos() < skip_pos {
+    //             continue;
+    //         }
+    //         // net_write(stream, packet_codec, &mut event_to_bytes(event)).await?;
+    //     }
+    //     self.offset = file_size;
+    //     Ok(())
+    // }
+
+    pub fn get_binlog_file(&mut self) -> Result<BinlogFile<BufReader<File>>> {
+        let mut file = File::open(&self.filename)?;
         let file_size = file.metadata()?.len();
-        // self.offset = file.metadata()?.len();
-        let mut binlog_file = if self.offset > 0 {
-            BinlogFile::from(BufReader::new(&file))
+        log::debug!("get_binlog_file:: self.offset: {}", self.offset);
+        let binlog_file = if self.offset > 0 {
+            file.seek(io::SeekFrom::Start(self.offset))?;
+            BinlogFile::from(BufReader::new(file))
         } else {
-            BinlogFile::new(BufReader::new(&file))?
+            BinlogFile::new(BufReader::new(file))?
         };
-        while let Some(event) = binlog_file.next() {
-            let event = event?;
-            if event.header().log_pos() < skip_pos {
-                continue;
-            }
-            net_write(stream, packet_codec, &mut event_to_bytes(event)).await?;
-        }
         self.offset = file_size;
-        Ok(())
+        Ok(binlog_file)
     }
 
     // pub async fn read_all_fn(&mut self, skip_pos: u32, callback: BinlogCallback) -> Result<()> {

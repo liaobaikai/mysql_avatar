@@ -8,7 +8,7 @@ use mysql_common::{
 };
 use sqlparser::ast::{Function, Select, Set, ShowStatementFilter};
 
-use crate::{consts::Command, mysqld::server_status_flags, packets::OkPacket, variable::Variable};
+use crate::{consts::Command, mysqld::server_status_flags, packets::OkPacket, variable::{get_session_var, Variable}};
 
 pub mod binlog;
 pub mod query;
@@ -46,19 +46,23 @@ impl KvPair {
     }
 }
 
-pub struct SqlCommand {
+pub struct SqlCommand<'a> {
     //
     client_capabilities: CapabilityFlags,
     // 会话级变量
-    session_vars: Vec<Variable>,
+    session_vars: &'a mut Vec<Variable>,
 }
 
-impl SqlCommand {
-    pub fn new(session_vars: Vec<Variable>) -> Self {
+impl<'a> SqlCommand<'a> {
+    pub fn new(session_vars: &'a mut Vec<Variable>) -> Self {
         Self {
             client_capabilities: CapabilityFlags::empty(),
             session_vars,
         }
+    }
+
+    pub fn get_session_var(&self, name: &str) -> Result<Variable> {
+        get_session_var(&self.session_vars, name)
     }
 
     pub fn set_client_capabilities(&mut self, client_capabilities: CapabilityFlags) {

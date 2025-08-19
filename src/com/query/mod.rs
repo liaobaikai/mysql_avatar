@@ -122,7 +122,7 @@ pub fn get_var(
     Ok((var, col_name))
 }
 
-impl Queryable for SqlCommand {
+impl<'a> Queryable for SqlCommand<'a> {
     fn query(&mut self, sql: &str) -> Result<Vec<BytesMut>> {
         for stmt in Parser::parse_sql(&MySqlDialect {}, &sql)? {
             match stmt {

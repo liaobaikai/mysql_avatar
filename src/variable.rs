@@ -19,11 +19,12 @@ lazy_static! {
         vars.push(Variable::new("server_uuid".to_owned(), VARIABLE_SCOPE_GLOBAL, false, Uuid::new_v4().to_string()));
         vars.push(Variable::new("binlog_checksum".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "CRC32".to_owned()));
         vars.push(Variable::new("gtid_mode".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "ON".to_owned()));
-        vars.push(Variable::new("rpl_semi_sync_master_enabled".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "0".to_owned()));
+        vars.push(Variable::new("rpl_semi_sync_master_enabled".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "1".to_owned()));
+        vars.push(Variable::new("rpl_semi_sync_source_enabled".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "1".to_owned()));
         
         vars.push(Variable::new("default_authentication_plugin".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "mysql_native_password".to_owned()));
         vars.push(Variable::new("datadir".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "".to_owned()));
-        vars.push(Variable::new("relay_log_basename".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "C:/Users/BK-liao/mysqltest/data/binlog/".to_owned()));
+        vars.push(Variable::new("relay_log_basename".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "/Users/lbk/mysqltest/data/binlog/".to_owned()));
         vars.push(Variable::new("relay_log_index".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "mysql-bin.index".to_owned()));
 
         vars.push(Variable::new(SESSION_CHARSET_KEY_NAME.to_owned(), VARIABLE_SCOPE_SESSION, true, "utf8".to_string()));
@@ -119,12 +120,13 @@ pub fn set_session_var(session_vars: &mut Vec<Variable>, name: &str, value: &str
     }
     if !exists {
         session_vars.push(Variable::new(name.to_owned(), VARIABLE_SCOPE_SESSION, true, value.to_string()));
+        log::debug!("set_session_var::session_vars: {:?}", session_vars);
     }
     Ok(())
 }
 
 #[allow(unused)]
-pub fn get_session_var(session_vars: &mut Vec<Variable>, name: &str) -> Result<Variable>{
+pub fn get_session_var(session_vars: &Vec<Variable>, name: &str) -> Result<Variable>{
     for var in session_vars.iter() {
         // name==name
         // @@name==@@name

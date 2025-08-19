@@ -159,4 +159,12 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test2() -> Result<()> {
+        let a = true;
+        println!("res: {}", a & true);
+
+        Ok(())
+    }
 }
