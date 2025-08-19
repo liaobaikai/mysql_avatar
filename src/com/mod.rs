@@ -41,7 +41,7 @@ pub struct KvPair {
 }
 
 impl KvPair {
-    fn new(key: String, val: String) -> Self {
+    pub fn new(key: String, val: String) -> Self {
         Self { key, val }
     }
 }
