@@ -7,15 +7,15 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug executable 'mysql_avatar'",
+            "name": "Debug executable 'Aella'",
             "cargo": {
                 "args": [
                     "build",
-                    "--bin=mysql_avatar",
-                    "--package=mysql_avatar"
+                    "--bin=Aella",
+                    "--package=Aella"
                 ],
                 "filter": {
-                    "name": "mysql_avatar",
+                    "name": "Aella",
                     "kind": "bin"
                 }
             },
@@ -28,17 +28,17 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug unit tests in executable 'mysql_avatar'",
+            "name": "Debug unit tests in executable 'Aella'",
             "cargo": {
                 "args": [
                     "test",
                     "--nocapture",
                     "--show-output",
-                    "--bin=mysql_avatar",
-                    "--package=mysql_avatar"
+                    "--bin=Aella",
+                    "--package=Aella"
                 ],
                 "filter": {
-                    "name": "mysql_avatar",
+                    "name": "Aella",
                     "kind": "bin"
                 }
             },

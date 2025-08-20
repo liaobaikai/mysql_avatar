@@ -1,5 +1,5 @@
 [package]
-name = "mysql_avatar"
+name = "Aella"
 version = "0.1.0"
 edition = "2024"
 
@@ -7,7 +7,7 @@ edition = "2024"
 anyhow = "1.0.99"
 bytes = "1.10.1"
 chrono = "0.4.41"
-clap = {version = "4.5.43", features = ["derive", "env", "cargo"]}
+clap = {version = "4.5.45", features = ["derive", "env", "cargo"]}
 futures-util = "0.3.31"
 hex = "0.4.3"
 lazy_static = "1.5.0"
