@@ -7,15 +7,15 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug executable 'Aella'",
+            "name": "Debug executable 'aella'",
             "cargo": {
                 "args": [
                     "build",
-                    "--bin=Aella",
-                    "--package=Aella"
+                    "--bin=aella",
+                    "--package=aella"
                 ],
                 "filter": {
-                    "name": "Aella",
+                    "name": "aella",
                     "kind": "bin"
                 }
             },
@@ -28,17 +28,17 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug unit tests in executable 'Aella'",
+            "name": "Debug unit tests in executable 'aella'",
             "cargo": {
                 "args": [
                     "test",
                     "--nocapture",
                     "--show-output",
-                    "--bin=Aella",
-                    "--package=Aella"
+                    "--bin=aella",
+                    "--package=aella"
                 ],
                 "filter": {
-                    "name": "Aella",
+                    "name": "aella",
                     "kind": "bin"
                 }
             },

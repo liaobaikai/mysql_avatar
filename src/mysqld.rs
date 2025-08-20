@@ -140,6 +140,7 @@ pub async fn init_server(port: u16) -> Result<()> {
         let relay_log_index_path =
             Path::new(relay_log_basename.value()).join(relay_log_index.value());
         let cloned_relay_log_index_path = relay_log_index_path.clone();
+
         tokio::spawn(async move {
             let mut handshake = Handshake::new();
             let mut session_vars: Vec<Variable> = Vec::new();
@@ -163,18 +164,13 @@ pub async fn init_server(port: u16) -> Result<()> {
             'outer: loop {
                 // let cloned_session_vars = session_vars.clone();
                 select! {
-                        Ok(_) = cloned_rx.changed(), if open_binlog_dump => {
-                            // 收到binlog变更的事件
-                            log::debug!("cloned_rx.changed...::: {:?}", open_binlog_dump);
-                            let filename = format!("{}", *cloned_rx.borrow_and_update());
-                            handle_binlog_changed(&filename, &mut binlog_reader, rpl_semi_sync_master_enabled, &mut open_need_ack, &mut socket, &mut packet_codec).await.unwrap();
-                        }
-
-                        // Ok(ready) = socket.ready(Interest::READABLE) => {
-                        //     if ready.is_readable() {
-
-                        //     }
+                        // Ok(_) = cloned_rx.changed(), if open_binlog_dump => {
+                        //     // 收到binlog变更的事件
+                        //     log::debug!("cloned_rx.changed...::: {:?}", open_binlog_dump);
+                        //     let filename = format!("{}", *cloned_rx.borrow_and_update());
+                        //     handle_binlog_changed(&filename, &mut binlog_reader, rpl_semi_sync_master_enabled, &mut open_need_ack, &mut socket, &mut packet_codec).await.unwrap();
                         // }
+
                         // Ok(_) = tokio::time::timeout(Duration::from_millis(500), socket.writable()) => {
                         Ok(ready) = socket.ready(Interest::WRITABLE) => {
                         // Ok(ready) = tokio::time::timeout(Duration::from_millis(500), socket.ready(Interest::WRITABLE)) => {
@@ -194,8 +190,8 @@ pub async fn init_server(port: u16) -> Result<()> {
                                 if let Err(e) = handle_write(&mut dst, &mut socket).await {
                                     // log::error!("Write error: {e}");
                                     log::info!("Broken pipe? {e}");
-                                    // break 'outer;
-                                    continue;
+                                    break 'outer;
+                                    // continue;
                                 }
                                 
                             }
@@ -206,96 +202,94 @@ pub async fn init_server(port: u16) -> Result<()> {
                             if ready.is_readable() {
                         // Ok(_) = tokio::time::timeout(Duration::from_millis(500), socket.readable()) => {
                                 log::debug!("socket.readable...{:?}", phase);
-                                let mut timeout = false;
+                                // let mut timeout = false;
                                 // 可以读数据
                                 match net_read(&mut socket).await {
                                     Ok(mut packet) => {
                                         let dst = decode_packet(&mut packet, &mut packet_codec).unwrap();
                                         buffer.extend_from_slice(&dst);
                                     },
-                                    Err(_e) => {
-                                        // log::info!("Connection closed: {e}");
-                                        // break 'outer;
-                                        timeout = true;
+                                    Err(e) => {
+                                        log::info!("Connection closed: {e}");
+                                        break 'outer;
                                     }
                                 };
                                 log::debug!("socket.readable...net_read...ok....{:?}", phase);
 
-                                if !timeout {
-                                    match phase {
-                                        ConnectionLifecycle::ConnectionPhaseInitialHandshakeResponse => {
-                                            // 验证密码
-                                            let (varify_pass, mut packet) = handshake.auth_with_response(&mut buffer).unwrap();
-                                            if varify_pass {
-                                                // 验证通过
-                                                phase = ConnectionLifecycle::CommandPhase;
-                                            }
-                                            sql_command.set_client_capabilities(*handshake.client_capabilities());
-                                            //
-                                            // buffer.clear();
-                                            // buffer.extend_from_slice(&data);
-
-                                            let mut dst = encode_packet(&mut packet, &mut packet_codec).unwrap();
-                                            net_write(&mut socket, &mut dst).await.unwrap();
-
-                                            // 不往下走
-                                            // continue;
+                                // if !timeout {
+                                match phase {
+                                    ConnectionLifecycle::ConnectionPhaseInitialHandshakeResponse => {
+                                        // 验证密码
+                                        let (varify_pass, mut packet) = handshake.auth_with_response(&mut buffer).unwrap();
+                                        if varify_pass {
+                                            // 验证通过
+                                            phase = ConnectionLifecycle::CommandPhase;
                                         }
-                                        ConnectionLifecycle::CommandPhase => {
-                                            // 是否收到其他命令
-                                            if let Some(com) = match_binlog_command(&mut buffer).unwrap() {
-                                                phase = ConnectionLifecycle::CommandBinlogDumpPhase;
-                                                // 开始接收监听事件
-                                                open_binlog_dump = true;
-                                                match com {
-                                                    Command::COM_BINLOG_DUMP => {
-                                                        if open_need_ack {
-                                                            // 解析ack
-                                                            let (filename, pos) = check_ack(&mut buffer, &mut binlog_reader).unwrap();
-                                                            log::info!("Ack {} {} recv from slave", filename, pos);
+                                        sql_command.set_client_capabilities(*handshake.client_capabilities());
+                                        //
+                                        // buffer.clear();
+                                        // buffer.extend_from_slice(&data);
 
-                                                        } else {
-                                                            // 解析命令
-                                                            let var1 = sql_command.get_session_var("@rpl_semi_sync_slave").unwrap();
-                                                            let var2 = sql_command.get_session_var("@rpl_semi_sync_replica").unwrap();
-                                                            rpl_semi_sync_master_enabled = rpl_semi_sync_master_enabled & (*var1.value() == "1".to_owned() || *var2.value() == "1".to_owned());
+                                        let mut dst = encode_packet(&mut packet, &mut packet_codec).unwrap();
+                                        net_write(&mut socket, &mut dst).await.unwrap();
 
-                                                            handle_com_binlog_dump(&mut socket,
-                                                                    &mut packet_codec,
-                                                                    &mut buffer,
-                                                                    &mut binlog_index,
-                                                                    &mut binlog_reader,
-                                                                    rpl_semi_sync_master_enabled,
-                                                                    &mut open_need_ack
-                                                            ).await.unwrap();
-                                                        }
-                                                    },
-                                                    // Command::COM_BINLOG_DUMP_GTID => handle_com_binlog_dump_gtid(),
-                                                    _ => {}
-                                                }
-                                                buffer.clear();
-                                            } else {
-                                                let mut data = sql_command.read(&mut buffer).unwrap();
-                                                'inner: loop {
-                                                    if data.is_empty() {
-                                                        break 'inner;
+                                        // 不往下走
+                                        // continue;
+                                    }
+                                    ConnectionLifecycle::CommandPhase => {
+                                        // 是否收到其他命令
+                                        if let Some(com) = match_binlog_command(&mut buffer).unwrap() {
+                                            phase = ConnectionLifecycle::CommandBinlogDumpPhase;
+                                            // 开始接收监听事件
+                                            open_binlog_dump = true;
+                                            match com {
+                                                Command::COM_BINLOG_DUMP => {
+                                                    if open_need_ack {
+                                                        // 解析ack
+                                                        let (filename, pos) = check_ack(&mut buffer, &mut binlog_reader).unwrap();
+                                                        log::info!("Ack {} {} recv from slave", filename, pos);
+
+                                                    } else {
+                                                        // 解析命令
+                                                        let var1 = sql_command.get_session_var("@rpl_semi_sync_slave").unwrap();
+                                                        let var2 = sql_command.get_session_var("@rpl_semi_sync_replica").unwrap();
+                                                        rpl_semi_sync_master_enabled = rpl_semi_sync_master_enabled & (*var1.value() == "1".to_owned() || *var2.value() == "1".to_owned());
+
+                                                        handle_com_binlog_dump(&mut socket,
+                                                                &mut packet_codec,
+                                                                &mut buffer,
+                                                                &mut binlog_index,
+                                                                &mut binlog_reader,
+                                                                rpl_semi_sync_master_enabled,
+                                                                &mut open_need_ack
+                                                        ).await.unwrap();
                                                     }
-                                                    let mut packet = data.remove(0);
-                                                    let mut dst = encode_packet(&mut packet, &mut packet_codec).unwrap();
-                                                    net_write(&mut socket, &mut dst).await.unwrap();
-                                                }
-                                                phase = ConnectionLifecycle::CommandPhase;
-                                                buffer.clear();
+                                                },
+                                                // Command::COM_BINLOG_DUMP_GTID => handle_com_binlog_dump_gtid(),
+                                                _ => {}
                                             }
-                                        }
-                                        _ => {
-                                            // 其他阶段
+                                            buffer.clear();
+                                        } else {
+                                            let mut data = sql_command.read(&mut buffer).unwrap();
+                                            'inner: loop {
+                                                if data.is_empty() {
+                                                    break 'inner;
+                                                }
+                                                let mut packet = data.remove(0);
+                                                let mut dst = encode_packet(&mut packet, &mut packet_codec).unwrap();
+                                                net_write(&mut socket, &mut dst).await.unwrap();
+                                            }
+                                            phase = ConnectionLifecycle::CommandPhase;
+                                            buffer.clear();
                                         }
                                     }
+                                    _ => {
+                                        // 其他阶段
+                                    }
                                 }
+                                // }
                             }
                         }
-
                         _ = tokio::time::sleep(Duration::from_secs(1)) => {
                             log::trace!("sleep 1s");
                         }
@@ -357,7 +351,8 @@ async fn handle_write(buffer: &mut BytesMut, stream: &mut TcpStream) -> Result<(
 pub async fn net_write(stream: &mut TcpStream, src: &mut BytesMut) -> Result<()> {
     log::trace!("net_write::src: {:?}", src);
     log::trace!("net_write::src:vec: {:?}", src.to_vec());
-    if let Err(e) = tokio::time::timeout(Duration::from_millis(500), stream.write_all(&src)).await? {
+    if let Err(e) = stream.write_all(&src).await {
+    // if let Err(e) = tokio::time::timeout(Duration::from_millis(500), stream.write_all(&src)).await? {
         return Err(anyhow!("failed to write to stream; err = {:?}", e));
     }
     stream.flush().await.unwrap();
@@ -367,8 +362,8 @@ pub async fn net_write(stream: &mut TcpStream, src: &mut BytesMut) -> Result<()>
 
 async fn net_read<'a>(stream: &mut TcpStream) -> Result<BytesMut> {
     let mut buf = [0; READ_BUFFER_SIZE];
-    // let n = match stream.read(&mut buf).await {
-    let n = match tokio::time::timeout(Duration::from_millis(500), stream.read(&mut buf)).await? {
+    let n = match stream.read(&mut buf).await {
+    // let n = match tokio::time::timeout(Duration::from_millis(500), stream.read(&mut buf)).await? {
         Ok(0) => {
             return Err(anyhow!("Socket closed"));
         }
