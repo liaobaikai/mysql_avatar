@@ -168,6 +168,7 @@ impl Handshake {
         }
         let mut buffer = BytesMut::with_capacity(data.len());
         buffer.extend_from_slice(&data);
+        input.clear();
         Ok((valid_pass == Some(true), buffer))
     }
 }

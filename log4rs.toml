@@ -10,7 +10,7 @@ pattern = "{d(%m %d %H:%M:%S%.3f)} {h({l:>5.5})} {i} {({M}:{L}):30.30}: {m}{n}"
 
 [appenders.file]
 kind = "rolling_file"
-path = "./logs/mysql_avatar.log"
+path = "./logs/aella.log"
 
 [appenders.file.encoder]
 pattern = "{d(%m %d %H:%M:%S%.3f)} {h({l:>5.5})} {i} {({M}:{L}):30.30}: {m}{n}"
@@ -23,7 +23,7 @@ max_random_delay = 0
 
 [appenders.file.policy.roller]
 kind = "fixed_window"
-pattern = "./logs/archive/mysql_avatar.{}.log"
+pattern = "./logs/archive/aella.{}.log"
 # 最大保存压缩文件数
 count = 999999
 # 压缩日志索引值起点

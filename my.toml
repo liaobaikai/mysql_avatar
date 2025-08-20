@@ -1,0 +1,27 @@
+[mysqld]
+port = 8527
+version = "1.0.1"
+version_comment = "Aella Server"
+protocol_version = 10
+server_id = 1
+binlog_checksum = "CRC32"
+max_allowed_packet = 102400
+rpl_semi_sync_master_enabled = 1
+# alias: rpl_semi_sync_master_enabled
+rpl_semi_sync_source_enabled = 1
+
+default_authentication_plugin = "mysql_native_password"
+datadir = "C:/Users/BK-liao/mysqltest/data"
+
+log_bin = 1
+log_bin_basename = "C:/Users/BK-liao/mysqltest/data/mysql-bin"
+log_bin_index = "mysql-bin.index"
+
+# relay_log = ""
+
+# 
+rpl_semi_sync_replica_enabled = 1
+# Unused.
+replica_max_allowed_packet = 1024
+replica_verify_checksum = 0
+

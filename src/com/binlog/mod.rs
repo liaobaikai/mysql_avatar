@@ -7,16 +7,18 @@ use std::{
     io::{self, BufRead, BufReader},
 };
 
+use crate::consts::Command;
+use crate::variable::get_global_var;
 use anyhow::{Result, anyhow};
 use bytes::{BufMut, BytesMut};
 use mysql_async::binlog::{BinlogVersion, events::Event};
 use mysql_common::binlog::{BinlogFileHeader, EventStreamReader};
 use mysql_common::io::ParseBuf;
 use mysql_common::misc::raw::RawInt;
-use crate::consts::Command;
-use crate::variable::get_global_var;
-pub mod index;
+use mysql_common::packets::ComRegisterSlave;
+use mysql_common::proto::MyDeserialize;
 pub mod event;
+pub mod index;
 
 #[allow(unused)]
 #[derive(Debug, Clone, Default)]
@@ -32,39 +34,48 @@ impl<'a> BinlogState {
         BinlogState { filename, pos, ack }
     }
 
-    pub fn set_filename_pos(filename: String, pos: u64) {
-
-    }
+    pub fn set_filename_pos(filename: String, pos: u64) {}
 }
 
 // 判断是否是binlog命令
-pub fn match_binlog_command(input: &mut BytesMut) -> Result<Option<Command>> {
+pub fn match_binlog_command(input: &BytesMut) -> Result<Option<Command>> {
     let mut buf = ParseBuf(&input);
     let com_val: RawInt<u8> = buf.parse(())?;
     let com: Command = Command::try_from(*com_val)?;
     log::debug!("match_binlog_command::com: {:?}", com);
     match com {
-        Command::COM_BINLOG_DUMP | Command::COM_BINLOG_DUMP_GTID => Ok(Some(com)),
+        Command::COM_BINLOG_DUMP | Command::COM_BINLOG_DUMP_GTID => {
+            Ok(Some(com))
+        }
         _ => Ok(None),
     }
 }
 
-pub fn event_to_bytes(event: Event, rpl_semi_sync_master_enabled: bool, need_ack: bool) -> BytesMut {
+pub fn parse_com_register_slave(input: &BytesMut) -> Result<ComRegisterSlave> {
+    let com = ComRegisterSlave::deserialize((), &mut ParseBuf(&input))?;
+    Ok(com)
+}
+
+pub fn event_to_bytes(
+    event: Event,
+    rpl_semi_sync_enabled: bool,
+    need_ack: bool,
+) -> BytesMut {
     let mut output = Vec::new();
     event
         .write(mysql_async::binlog::BinlogVersion::Version4, &mut output)
         .unwrap();
     let mut src = BytesMut::new();
     src.put_u8(0x00);
-    if rpl_semi_sync_master_enabled {
-        src.put_u8(0xef);  // 魔术字符
+    if rpl_semi_sync_enabled {
+        src.put_u8(0xef); // 魔术字符
         if need_ack {
-            src.put_u8(0x01);  // 是否需要回復ack
+            src.put_u8(0x01); // 是否需要回復ack
         } else {
             src.put_u8(0x00);
         }
     }
-    
+
     src.extend_from_slice(&output);
     src
 }
@@ -131,6 +142,7 @@ pub struct MyBinlogFileReader {
     filename: PathBuf,
     // binlog位点
     pos: u64,
+    //
     server_id: u32,
 }
 
@@ -143,7 +155,12 @@ fn get_server_id() -> u32 {
 #[allow(unused)]
 impl<'a> MyBinlogFileReader {
     pub fn new() -> Self {
-        Self { offset: 0, filename: PathBuf::new(), pos: 0, server_id: get_server_id() }
+        Self {
+            offset: 0,
+            filename: PathBuf::new(),
+            pos: 0,
+            server_id: get_server_id(),
+        }
     }
 
     // 可以设置当前文件，用于文件切换
@@ -180,7 +197,6 @@ impl<'a> MyBinlogFileReader {
     pub fn server_id(&self) -> u32 {
         self.server_id
     }
-    
 
     // 如果文件不存在，则直接报错
     pub fn try_from(filename: PathBuf) -> Result<Self> {
@@ -192,7 +208,7 @@ impl<'a> MyBinlogFileReader {
             offset: 0,
             pos: 0,
             filename,
-            server_id: get_server_id()
+            server_id: get_server_id(),
         })
     }
 
@@ -235,7 +251,7 @@ impl<'a> MyBinlogFileReader {
     //     stream: &mut TcpStream,
     //     packet_codec: &mut PacketCodec,
     // ) -> Result<()> {
-        
+
     //     while let Some(event) = binlog_file.next() {
     //         let event = event?;
     //         if event.header().log_pos() < skip_pos {
@@ -250,7 +266,11 @@ impl<'a> MyBinlogFileReader {
     pub fn get_binlog_file(&mut self) -> Result<BinlogFile<BufReader<File>>> {
         let mut file = File::open(&self.filename)?;
         let file_size = file.metadata()?.len();
-        log::debug!("get_binlog_file:: filename: {} offset: {}", self.filename.display(), self.offset);
+        log::debug!(
+            "get_binlog_file:: filename: {} offset: {}",
+            self.filename.display(),
+            self.offset
+        );
         let binlog_file = if self.offset > 0 {
             file.seek(io::SeekFrom::Start(self.offset))?;
             BinlogFile::from(BufReader::new(file))
@@ -336,6 +356,124 @@ impl<'a> MyBinlogFileReader {
     //     Ok(())
     // }
 }
+
+#[derive(Debug, Clone)]
+pub struct ReplicaInfo {
+    // slave server_id
+    // From COM_REGISTER_SLAVE
+    server_id: u32,
+
+    // Request from COM_BINLOG_DUMP
+    binlog_dump: bool,
+    request_filename: String,
+    request_pos: u32,
+
+    // Request from COM_BINLOG_DUMP_GTID
+    binlog_dump_gtid: bool,
+    request_gtid: String,
+
+    // From `set @rpl_semi_sync_replica=1, rpl_semi_sync_slave=1`
+    // alias: rpl_semi_sync_replica
+    rpl_semi_sync_slave: bool,
+    // alias: rpl_semi_sync_slave
+    rpl_semi_sync_replica: bool,
+
+    // 
+    need_ack: bool,
+}
+
+impl ReplicaInfo {
+    pub fn new() -> Self {
+        Self {
+            server_id: 0,
+            binlog_dump: false,
+            request_filename: "".to_owned(),
+            request_pos: 0,
+            binlog_dump_gtid: false,
+            request_gtid: "".to_owned(),
+            rpl_semi_sync_slave: false,
+            rpl_semi_sync_replica: false,
+            need_ack: false
+        }
+    }
+
+    pub fn with_filename_pos(&mut self, filename: String, pos: u32) {
+        self.request_filename = filename;
+        self.request_pos = pos;
+        self.binlog_dump = true;
+    }
+
+    pub fn with_rpl_semi_sync_replica(&mut self, enable: bool) {
+        self.rpl_semi_sync_slave = enable;
+        self.rpl_semi_sync_replica = enable;
+    }
+
+    pub fn with_server_id(&mut self, server_id: u32) {
+        self.server_id = server_id;
+    }
+
+    pub fn with_need_ack(&mut self, need_ack: bool) {
+        self.need_ack = need_ack;
+    }
+
+    pub fn need_ack(&self) -> bool {
+        self.need_ack
+    }
+
+    pub fn server_id(&self) -> u32 {
+        self.server_id
+    }
+
+    pub fn rpl_semi_sync_replica(&self) -> bool{
+        self.rpl_semi_sync_replica
+    }
+
+    pub fn binlog_dump(&self) -> bool{
+        self.binlog_dump
+    }
+
+    pub fn binlog_dump_gtid(&self) -> bool{
+        self.binlog_dump_gtid
+    }
+
+
+}
+
+#[allow(unused)]
+#[derive(Debug, Clone, Copy)]
+pub struct MasterInfo {
+    server_id: u32,
+    rpl_semi_sync_master_enabled: bool,
+    rpl_semi_sync_source_enabled: bool,
+}
+
+impl MasterInfo {
+    pub fn new() -> Self {
+        Self { server_id: 0, rpl_semi_sync_master_enabled: false, rpl_semi_sync_source_enabled: false }
+    }
+
+    pub fn with_server_id(&mut self, server_id: u32) {
+        self.server_id = server_id;
+    }
+
+    pub fn with_rpl_semi_sync_source(&mut self, enable: bool) {
+        self.rpl_semi_sync_master_enabled = enable;
+        self.rpl_semi_sync_source_enabled = enable;
+    }
+
+    pub fn rpl_semi_sync_master_enabled(&self) -> bool {
+        self.rpl_semi_sync_master_enabled
+    }
+
+    pub fn rpl_semi_sync_source_enabled(&self) -> bool {
+        self.rpl_semi_sync_source_enabled
+    }
+
+    pub fn server_id(&self) -> u32 {
+        self.server_id
+    }
+}
+
 
 // #[cfg(test)]
 // mod tests {

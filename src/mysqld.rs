@@ -1,18 +1,15 @@
-use std::{ffi::OsStr, path::Path, time::Duration};
+use std::{ffi::OsStr, io, path::Path, time::Duration};
 
 use anyhow::{Result, anyhow};
 use bytes::BytesMut;
-use mysql_async::{
-    binlog::events::{Event, RotateEvent},
-    consts::StatusFlags,
-};
+use mysql_async::{binlog::EventType, consts::StatusFlags};
 use mysql_common::{
     io::ParseBuf,
     packets::{ComBinlogDump, SemiSyncAckPacket},
     proto::{MyDeserialize, codec::PacketCodec},
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt, Interest},
+    io::{AsyncWriteExt, Interest},
     net::{TcpListener, TcpStream},
     select,
     sync::watch,
@@ -23,7 +20,7 @@ use crate::{
     com::{
         SqlCommand,
         binlog::{
-            MyBinlogFileReader, event::EventExt, event_to_bytes, index::BinlogIndex,
+            MasterInfo, MyBinlogFileReader, ReplicaInfo, event_to_bytes, index::BinlogIndex,
             match_binlog_command,
         },
     },
@@ -48,7 +45,7 @@ enum ConnectionLifecycle {
     // 握手响应
     ConnectionPhaseInitialHandshakeResponse,
     // 认证通过响应
-    // ConnectionPhaseAuthenticationResponse,
+    ConnectionPhaseAuthenticationResponse,
 
     //
     CommandPhase,
@@ -69,8 +66,12 @@ pub async fn init_server(port: u16) -> Result<()> {
     // 是否启用半同步复制模式
     let var1 = get_global_var("rpl_semi_sync_master_enabled").unwrap();
     let var2 = get_global_var("rpl_semi_sync_source_enabled").unwrap();
-    let mut rpl_semi_sync_master_enabled =
-        *var1.value() == "1".to_owned() || *var2.value() == "1".to_owned();
+    let mut master_info = MasterInfo::new();
+    {
+        master_info.with_rpl_semi_sync_source(
+            *var1.value() == "1".to_owned() || *var2.value() == "1".to_owned(),
+        );
+    }
 
     // 启动另一个线程，监控binlog日志是否有变化，主要是判断大小与relaylog文件大小
     // 如果有变化，通过另一个消息通道通知读取并往stream发送。
@@ -89,6 +90,7 @@ pub async fn init_server(port: u16) -> Result<()> {
         let mut index = BinlogIndex::try_from(cloned_relay_log_index_path.to_path_buf()).unwrap();
         let mut reader: MyBinlogFileReader = MyBinlogFileReader::new();
         let mut binlog_filename = String::new();
+
         loop {
             select! {
                 _ = intv.tick() => {
@@ -99,6 +101,8 @@ pub async fn init_server(port: u16) -> Result<()> {
                                 log::debug!("Binlog filename changed...{filename}");
                                 binlog_filename = filename.clone();
                                 cloned_tx.send(filename.clone()).unwrap();
+                                // 如果发完这个,然后再发心跳,最终心跳会把这个冲掉
+                                continue;
                             } else {
                                 // 监控文件是否变化
                                 // log::debug!("filename: {filename}");
@@ -106,6 +110,8 @@ pub async fn init_server(port: u16) -> Result<()> {
                                 if reader.changed().unwrap() {
                                     log::debug!("Binlog file changed...{filename}");
                                     cloned_tx.send(filename.clone()).unwrap();
+                                    // 如果发完这个,然后再发心跳,最终心跳会把这个冲掉
+                                    continue;
                                 }
                             }
                         },
@@ -119,6 +125,9 @@ pub async fn init_server(port: u16) -> Result<()> {
                                     if reader.changed().unwrap() {
                                         log::debug!("Binlog file changed...{filename}");
                                         cloned_tx.send(filename.clone()).unwrap();
+
+                                        // 如果发完这个,然后再发心跳,最终心跳会把这个冲掉
+                                        continue;
                                     }
                                 }
                                 None => {
@@ -127,7 +136,9 @@ pub async fn init_server(port: u16) -> Result<()> {
                             }
                         },
                     }
-                    // log::debug!("Binlog watcher running...");
+                    // 心跳
+                    cloned_tx.send(format!("{}", EventType::HEARTBEAT_EVENT as u8)).unwrap();
+                    log::debug!("Binlog watcher running...");
                 }
             }
         }
@@ -158,148 +169,142 @@ pub async fn init_server(port: u16) -> Result<()> {
             let mut phase = ConnectionLifecycle::ConnectionPhaseInitialHandshake;
             let mut buffer = handshake.init_plain_packet();
             // 是否开始dump binlog
-            let mut open_binlog_dump = false;
-            let mut open_need_ack = false;
+            // let mut open_binlog_dump = false;
+            // let mut open_need_ack = false;
+
+            let mut replica = ReplicaInfo::new();
 
             'outer: loop {
-                // let cloned_session_vars = session_vars.clone();
                 select! {
-                    // biased;
-                        Ok(_) = cloned_rx.changed(), if open_binlog_dump => {
-                            // 收到binlog变更的事件
-                            log::debug!("cloned_rx.changed...::: {:?}", open_binlog_dump);
-                            let filename = format!("{}", *cloned_rx.borrow_and_update());
-                            handle_binlog_changed(&filename, &mut binlog_reader, rpl_semi_sync_master_enabled, &mut open_need_ack, &mut socket, &mut packet_codec).await.unwrap();
-                        }
+                // biased;
+                    Ok(_) = cloned_rx.changed() => {
+                    // Ok(_) = cloned_rx.changed(), if open_binlog_dump => {
+                        // 收到binlog变更的事件
+                        log::debug!("cloned_rx.changed...::: binlog_dump:{}, binlog_dump_gtid:{}", replica.binlog_dump(), replica.binlog_dump_gtid());
+                        let filename = format!("{}", *cloned_rx.borrow_and_update());
+                        handle_binlog_changed(&filename, &mut binlog_reader, &master_info, &mut replica, &mut socket, &mut packet_codec).await.unwrap();
+                    },
 
-                        // Ok(_) = tokio::time::timeout(Duration::from_millis(500), socket.writable()) => {
-                        // Ok(ready) = socket.ready(Interest::WRITABLE) => {
-                        //     log::debug!("socket.ready(Interest::WRITABLE)...");
-                        Ok(_) = socket.writable(), if !buffer.is_empty() => {
-                            // if ready.is_writable() && !buffer.is_empty() {
-                                log::debug!("socket.writable...");
-                                // 可以写数据
-                                // 添加包头
-                                match phase {
-                                    ConnectionLifecycle::ConnectionPhaseInitialHandshake => {
-                                        phase = ConnectionLifecycle::ConnectionPhaseInitialHandshakeResponse;
-                                    }
-                                    _ => {}
+                    Ok(ready) = socket.ready(Interest::READABLE | Interest::WRITABLE) => {
+
+                        if ready.is_writable() && !buffer.is_empty() {
+                            log::debug!("socket.writable...");
+                            // 可以写数据
+                            // 添加包头
+                            match phase {
+                                ConnectionLifecycle::ConnectionPhaseInitialHandshake => {
+                                    phase = ConnectionLifecycle::ConnectionPhaseInitialHandshakeResponse;
                                 }
+                                _ => {}
+                            }
 
-                                let mut dst = encode_packet(&mut buffer, &mut packet_codec).unwrap();
-                                buffer.clear();
-                                if let Err(e) = handle_write(&mut dst, &mut socket).await {
-                                    // log::error!("Write error: {e}");
-                                    log::info!("Broken pipe? {e}");
+                            let mut packet = encode_packet(&mut buffer, &mut packet_codec).unwrap();
+                            match net_write(&mut socket, &mut packet).await {
+                                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                                    continue;
+                                }
+                                Err(e) => {
+                                    log::info!("Connection closed: {e}");
                                     break 'outer;
-                                    // continue;
                                 }
-                                
-                            // }
-                        }
+                                _ => {}
+                            };
 
-                        // Ok(ready) = tokio::time::timeout(Duration::from_millis(500), socket.writable()) => {
-                        // Ok(ready) = socket.ready(Interest::READABLE) => {
-                        //     log::debug!("socket.ready(Interest::READABLE)...");
-                        //     if ready.is_readable() {
 
-                        Ok(_) = socket.readable() => {
-                                log::debug!("socket.readable...{:?}", phase);
-                                // let mut timeout = false;
-                                // 可以读数据
-                                match net_read(&mut socket).await {
-                                    Ok(mut packet) => {
-                                        let dst = decode_packet(&mut packet, &mut packet_codec).unwrap();
-                                        buffer.extend_from_slice(&dst);
-                                    },
-                                    Err(e) => {
-                                        log::info!("Connection closed: {e}");
-                                        break 'outer;
+                        } else if ready.is_readable() {
+                            log::debug!("socket.readable...{:?}", phase);
+                            // let mut timeout = false;
+                            // 可以读数据
+                            match net_read(&mut socket).await {
+                                Ok(mut packet) => {
+                                    buffer.extend_from_slice(&decode_packet(&mut packet, &mut packet_codec).unwrap());
+                                },
+                                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                                    continue;
+                                }
+                                Err(e) => {
+                                    log::info!("Connection closed: {e}");
+                                    break 'outer;
+                                }
+                            };
+                            log::debug!("socket.readable...net_read...ok....{:?}", phase);
+
+                            // if !timeout {
+                            match phase {
+                                ConnectionLifecycle::ConnectionPhaseInitialHandshakeResponse => {
+                                    // 验证密码
+                                    let (varify_pass, mut packet) = handshake.auth_with_response(&mut buffer).unwrap();
+                                    if varify_pass {
+                                        // 验证通过
+                                        phase = ConnectionLifecycle::ConnectionPhaseAuthenticationResponse;
                                     }
-                                };
-                                log::debug!("socket.readable...net_read...ok....{:?}", phase);
+                                    sql_command.set_client_capabilities(*handshake.client_capabilities());
+                                    let mut dst = encode_packet(&mut packet, &mut packet_codec).unwrap();
+                                    net_write(&mut socket, &mut dst).await.unwrap();
 
-                                // if !timeout {
-                                match phase {
-                                    ConnectionLifecycle::ConnectionPhaseInitialHandshakeResponse => {
-                                        // 验证密码
-                                        let (varify_pass, mut packet) = handshake.auth_with_response(&mut buffer).unwrap();
-                                        if varify_pass {
-                                            // 验证通过
-                                            phase = ConnectionLifecycle::CommandPhase;
-                                        }
-                                        sql_command.set_client_capabilities(*handshake.client_capabilities());
-                                        //
-                                        // buffer.clear();
-                                        // buffer.extend_from_slice(&data);
+                                    log::debug!("varify_pass: {varify_pass}");
+                                }
+                                ConnectionLifecycle::ConnectionPhaseAuthenticationResponse | ConnectionLifecycle::CommandPhase => {
+                                    // 是否收到其他命令
+                                    if let Some(com) = match_binlog_command(&buffer).unwrap() {
+                                        phase = ConnectionLifecycle::CommandBinlogDumpPhase;
+                                        match com {
+                                            Command::COM_BINLOG_DUMP => {
+                                                // 开始接收监听事件
+                                                // open_binlog_dump = true;
+                                                if replica.need_ack() {
+                                                    // 解析ack
+                                                    let (filename, pos) = check_ack(&mut buffer, &mut binlog_reader).unwrap();
+                                                    log::info!("Ack {} {} recv from slave", filename, pos);
 
-                                        let mut dst = encode_packet(&mut packet, &mut packet_codec).unwrap();
-                                        net_write(&mut socket, &mut dst).await.unwrap();
+                                                } else {
+                                                    // 解析命令
+                                                    let var1 = sql_command.get_session_var("@rpl_semi_sync_slave").unwrap();
+                                                    let var2 = sql_command.get_session_var("@rpl_semi_sync_replica").unwrap();
+                                                    // rpl_semi_sync_master_enabled = rpl_semi_sync_master_enabled & (*var1.value() == "1".to_owned() || *var2.value() == "1".to_owned());
+                                                    replica.with_rpl_semi_sync_replica(*var1.value() == "1".to_owned() || *var2.value() == "1".to_owned());
 
-                                        // 不往下走
-                                        // continue;
-                                    }
-                                    ConnectionLifecycle::CommandPhase => {
-                                        // 是否收到其他命令
-                                        if let Some(com) = match_binlog_command(&mut buffer).unwrap() {
-                                            phase = ConnectionLifecycle::CommandBinlogDumpPhase;
-                                            // 开始接收监听事件
-                                            open_binlog_dump = true;
-                                            match com {
-                                                Command::COM_BINLOG_DUMP => {
-                                                    if open_need_ack {
-                                                        // 解析ack
-                                                        let (filename, pos) = check_ack(&mut buffer, &mut binlog_reader).unwrap();
-                                                        log::info!("Ack {} {} recv from slave", filename, pos);
-
-                                                    } else {
-                                                        // 解析命令
-                                                        let var1 = sql_command.get_session_var("@rpl_semi_sync_slave").unwrap();
-                                                        let var2 = sql_command.get_session_var("@rpl_semi_sync_replica").unwrap();
-                                                        rpl_semi_sync_master_enabled = rpl_semi_sync_master_enabled & (*var1.value() == "1".to_owned() || *var2.value() == "1".to_owned());
-
-                                                        handle_com_binlog_dump(&mut socket,
-                                                                &mut packet_codec,
-                                                                &mut buffer,
-                                                                &mut binlog_index,
-                                                                &mut binlog_reader,
-                                                                rpl_semi_sync_master_enabled,
-                                                                &mut open_need_ack
-                                                        ).await.unwrap();
-                                                    }
-                                                },
-                                                // Command::COM_BINLOG_DUMP_GTID => handle_com_binlog_dump_gtid(),
-                                                _ => {}
-                                            }
-                                            buffer.clear();
-                                        } else {
-                                            let mut data = sql_command.read(&mut buffer).unwrap();
-                                            'inner: loop {
-                                                if data.is_empty() {
-                                                    break 'inner;
+                                                    handle_com_binlog_dump(&mut socket,
+                                                            &mut packet_codec,
+                                                            &mut buffer,
+                                                            &mut binlog_index,
+                                                            &mut binlog_reader,
+                                                            &master_info,
+                                                            &mut replica
+                                                    ).await.unwrap();
                                                 }
-                                                let mut packet = data.remove(0);
-                                                let mut dst = encode_packet(&mut packet, &mut packet_codec).unwrap();
-                                                net_write(&mut socket, &mut dst).await.unwrap();
-                                            }
-                                            phase = ConnectionLifecycle::CommandPhase;
-                                            buffer.clear();
+                                            },
+                                            // Command::COM_BINLOG_DUMP_GTID => handle_com_binlog_dump_gtid(),
+                                            _ => {}
                                         }
+                                        buffer.clear();
+                                    } else {
+                                        let mut data = sql_command.read(&mut buffer, &mut replica).unwrap();
+                                        buffer.clear();
+                                        'inner: loop {
+                                            if data.is_empty() {
+                                                break 'inner;
+                                            }
+                                            let mut packet = data.remove(0);
+                                            let mut dst = encode_packet(&mut packet, &mut packet_codec).unwrap();
+                                            net_write(&mut socket, &mut dst).await.unwrap();
+                                        }
+                                        phase = ConnectionLifecycle::CommandPhase;
                                     }
-                                    _ => {
-                                        // 其他阶段
-                                    }
-                                // }
-                                // }
+                                }
+                                _ => {
+                                    // 其他阶段
+                                }
+                            // }
                             }
                         }
-                        // _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                        //     log::trace!("sleep 1s");
-                        // }
-                        
-
                     }
+                    // _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                    //     log::trace!("sleep 1s");
+                    // }
+
+
+                }
             }
             log::info!("Connection shutdown");
         });
@@ -322,63 +327,57 @@ fn check_ack(
 async fn handle_binlog_changed(
     filename: &String,
     binlog_reader: &mut MyBinlogFileReader,
-    rpl_semi_sync_master_enabled: bool,
-    need_ack: &mut bool,
+    master: &MasterInfo,
+    replica: &mut ReplicaInfo,
     stream: &mut TcpStream,
     packet_codec: &mut PacketCodec,
 ) -> Result<()> {
-    log::debug!("handle_binlog_changed::filename: {filename}");
-    log::debug!("rpl_semi_sync_master_enabled={rpl_semi_sync_master_enabled}, need_ack={need_ack}");
+    log::debug!(
+        "rpl_semi_sync_master_enabled={}, need_ack={}, filename: {}",
+        master.rpl_semi_sync_master_enabled() & replica.rpl_semi_sync_replica(),
+        replica.need_ack(), filename
+    );
+    // 发送心跳包
+    if *filename == format!("{}", EventType::HEARTBEAT_EVENT as u8) {
+        log::info!("HEARTBEAT_EVENT...");
+        return Ok(());
+    }
     // 文件名不一样
     binlog_dump(
         stream,
         packet_codec,
         binlog_reader,
-        rpl_semi_sync_master_enabled,
-        need_ack,
+        master,
+        replica,
         filename.clone(),
         0,
     )
     .await
 }
 
-// 写数据
-async fn handle_write(buffer: &mut BytesMut, stream: &mut TcpStream) -> Result<()> {
-    log::debug!("handle_write...");
-    net_write(stream, buffer).await?;
-    buffer.clear();
-
-    Ok(())
-}
-
 //
-pub async fn net_write(stream: &mut TcpStream, src: &mut BytesMut) -> Result<()> {
+async fn net_write(stream: &mut TcpStream, src: &mut BytesMut) -> io::Result<()> {
     log::trace!("net_write::src: {:?}", src);
     log::trace!("net_write::src:vec: {:?}", src.to_vec());
-    if let Err(e) = stream.write_all(&src).await {
-    // if let Err(e) = tokio::time::timeout(Duration::from_millis(500), stream.write_all(&src)).await? {
-        return Err(anyhow!("failed to write to stream; err = {:?}", e));
+    // match stream.write_all(&src).await {
+    match stream.try_write(&src) {
+        Ok(0) => return Err(io::ErrorKind::ConnectionAborted.into()),
+        Ok(_) => stream.flush().await?,
+        Err(e) => return Err(e),
     }
-    stream.flush().await.unwrap();
-    src.clear();
     Ok(())
 }
 
-async fn net_read<'a>(stream: &mut TcpStream) -> Result<BytesMut> {
+async fn net_read<'a>(stream: &mut TcpStream) -> io::Result<BytesMut> {
     let mut buf = [0; READ_BUFFER_SIZE];
-    let n = match stream.read(&mut buf).await {
-    // let n = match tokio::time::timeout(Duration::from_millis(500), stream.read(&mut buf)).await? {
-        Ok(0) => {
-            return Err(anyhow!("Socket closed"));
-        }
+    // let n = match stream.read(&mut buf).await {
+    let n = match stream.try_read(&mut buf) {
+        Ok(0) => return Err(io::ErrorKind::ConnectionAborted.into()),
         Ok(n) => n,
-        Err(e) => {
-            return Err(anyhow!("failed to read from socket; err = {:?}", e));
-        }
+        Err(e) => return Err(e),
     };
     let data = &buf[0..n];
     log::trace!("net_read::buf:{:?}", data);
-
     let mut src = BytesMut::new();
     src.extend_from_slice(data);
 
@@ -406,8 +405,8 @@ async fn handle_com_binlog_dump(
     buffer: &mut BytesMut,
     binlog_index: &mut BinlogIndex,
     binlog_reader: &mut MyBinlogFileReader,
-    rpl_semi_sync_master_enabled: bool,
-    need_ack: &mut bool,
+    master: &MasterInfo,
+    replica: &mut ReplicaInfo,
 ) -> Result<()> {
     let com_binlog_dump = ComBinlogDump::deserialize((), &mut ParseBuf(&buffer))?;
     let request_filename = com_binlog_dump.filename().to_string();
@@ -416,6 +415,7 @@ async fn handle_com_binlog_dump(
         com_binlog_dump.pos()
     );
     binlog_index.with_request_binlog_filename(request_filename.clone());
+    replica.with_filename_pos(request_filename.clone(), com_binlog_dump.pos());
 
     let filename = match binlog_index.find()? {
         Some(name) => name,
@@ -434,8 +434,8 @@ async fn handle_com_binlog_dump(
         stream,
         packet_codec,
         binlog_reader,
-        rpl_semi_sync_master_enabled,
-        need_ack,
+        master,
+        replica,
         filename,
         com_binlog_dump.pos(),
     )
@@ -462,8 +462,8 @@ async fn handle_com_binlog_dump(
             stream,
             packet_codec,
             binlog_reader,
-            rpl_semi_sync_master_enabled,
-            need_ack,
+            master,
+            replica,
             filename,
             0,
         )
@@ -472,7 +472,7 @@ async fn handle_com_binlog_dump(
 
     // 已经追上日志了。
     log::info!("Binlog catched up latest pos");
-    *need_ack = true;
+    replica.with_need_ack(true);
     log::info!("Master need_ack enable.");
 
     Ok(())
@@ -482,11 +482,11 @@ async fn binlog_dump(
     stream: &mut TcpStream,
     packet_codec: &mut PacketCodec,
     binlog_reader: &mut MyBinlogFileReader,
-    rpl_semi_sync_master_enabled: bool,
-    need_ack: &mut bool,
+    master: &MasterInfo,
+    replica: &mut ReplicaInfo,
     filename: String,
     skip_pos: u32,
-) -> Result<(), anyhow::Error> {
+) -> Result<()> {
     binlog_reader.with_filename(Path::new(&filename).to_path_buf())?;
     let mut binlog_file = binlog_reader.get_binlog_file()?;
     while let Some(event) = binlog_file.next() {
@@ -495,9 +495,22 @@ async fn binlog_dump(
         if skip_pos > 0 && event.header().log_pos() < skip_pos {
             continue;
         }
+
+        log::trace!("event::header::server_id:{}, replica::server_id:{}", event.header().server_id(), replica.server_id());
+        if event.header().server_id() == replica.server_id() {
+            return Err(anyhow!(
+                "Slave has same server-id as master ({})",
+                replica.server_id()
+            ));
+        }
         binlog_reader.with_server_id(event.header().server_id());
+        // master.with_server_id(server_id);
         // 将事件发给客户端
-        let mut src = event_to_bytes(event, rpl_semi_sync_master_enabled, *need_ack);
+        let mut src = event_to_bytes(
+            event,
+            master.rpl_semi_sync_master_enabled() & replica.rpl_semi_sync_replica(),
+            replica.need_ack(),
+        );
         let mut dst = encode_packet(&mut src, packet_codec)?;
         net_write(stream, &mut dst).await?;
     }

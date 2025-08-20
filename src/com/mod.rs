@@ -8,7 +8,7 @@ use mysql_common::{
 };
 use sqlparser::ast::{Function, Select, Set, ShowStatementFilter};
 
-use crate::{consts::Command, mysqld::server_status_flags, packets::OkPacket, variable::{get_session_var, Variable}};
+use crate::{com::binlog::{parse_com_register_slave, ReplicaInfo}, consts::Command, mysqld::server_status_flags, packets::OkPacket, variable::{get_session_var, Variable}};
 
 pub mod binlog;
 pub mod query;
@@ -51,6 +51,7 @@ pub struct SqlCommand<'a> {
     client_capabilities: CapabilityFlags,
     // 会话级变量
     session_vars: &'a mut Vec<Variable>,
+    // 
 }
 
 impl<'a> SqlCommand<'a> {
@@ -69,7 +70,7 @@ impl<'a> SqlCommand<'a> {
         self.client_capabilities.insert(client_capabilities);
     }
 
-    pub fn read(&mut self, input: &mut BytesMut) -> Result<Vec<BytesMut>> {
+    pub fn read(&mut self, input: &mut BytesMut, replica: &mut ReplicaInfo) -> Result<Vec<BytesMut>> {
         let mut buf = ParseBuf(&input);
         let com_val: RawInt<u8> = buf.parse(())?;
         let command: Command = Command::try_from(*com_val)?;
@@ -83,7 +84,10 @@ impl<'a> SqlCommand<'a> {
             Command::COM_QUIT => {
                 return Err(anyhow!("Connection closed"));
             }
-            Command::COM_REGISTER_SLAVE => {}
+            Command::COM_REGISTER_SLAVE => {
+                let com_register_slave = parse_com_register_slave(&input)?;
+                replica.with_server_id(com_register_slave.server_id());
+            }
             _ => {}
         }
 

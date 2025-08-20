@@ -13,18 +13,20 @@ use sqlparser::{
 
 use crate::{
     com::{
-        ok_packet, query::{
+        KvPair, Queryable, SqlCommand, ok_packet,
+        query::{
             query_select_func::{
                 binlog_gtid_pos, current_timestamp, query_fn_name, unix_timestamp_string,
             },
             query_set::{get_var_setting_key, get_var_setting_value},
-        }, KvPair, Queryable, SqlCommand
+        },
     },
     consts::{Charset, ColumnDefinitionFlags},
     mysqld::server_status_flags,
     packets::{ColumnDefinition, EofPacket, OkPacket},
     variable::{
-        get_global_var, get_session_var, set_session_var, Variable, SESSION_CHARSET_KEY_NAME, SYSVARS
+        SESSION_CHARSET_KEY_NAME, SYSVARS, Variable, get_global_var, get_session_var,
+        set_session_var,
     },
 };
 
@@ -124,31 +126,59 @@ pub fn get_var(
 
 impl<'a> Queryable for SqlCommand<'a> {
     fn query(&mut self, sql: &str) -> Result<Vec<BytesMut>> {
-        for stmt in Parser::parse_sql(&MySqlDialect {}, &sql)? {
-            match stmt {
-                Statement::Query(q) => match *q.body {
-                    SetExpr::Select(s) => {
-                        // log::debug!("query::select: {:?}", s);
-                        return self.select(*s);
+        match Parser::parse_sql(&MySqlDialect {}, &sql) {
+            Ok(stmts) => {
+                for stmt in stmts {
+                    match stmt {
+                        Statement::Query(q) => match *q.body {
+                            SetExpr::Select(s) => {
+                                // log::debug!("query::select: {:?}", s);
+                                return self.select(*s);
+                            }
+                            _ => {}
+                        },
+
+                        Statement::Set(s) => {
+                            // log::debug!("query::set: {:?}", s);
+                            return self.set(s);
+                        }
+
+                        Statement::ShowVariables {
+                            filter,
+                            global,
+                            session,
+                        } => {
+                            // log::debug!("ShowVariables::filter: {:?}", filter);
+                            return self.show(filter, global, session);
+                        }
+
+                        Statement::ShowStatus { filter, global, session } => {
+                            // 半同步的情况
+                            // Rpl_semi_sync_master_clients
+                            // Rpl_semi_sync_master_get_ack
+                            // Rpl_semi_sync_master_request_ack
+                            // Rpl_semi_sync_master_status
+                            // 
+                        }
+
+                        _ => {
+                            // 4 show slave status\G
+                            log::info!("Other: {:?}", stmt);
+                        }
                     }
-                    _ => {}
-                },
-
-                Statement::Set(s) => {
-                    // log::debug!("query::set: {:?}", s);
-                    return self.set(s);
                 }
-
-                Statement::ShowVariables {
-                    filter,
-                    global,
-                    session,
-                } => {
-                    // log::debug!("ShowVariables::filter: {:?}", filter);
-                    return self.show(filter, global, session);
-                }
-
-                _ => {}
+            }
+            Err(_e) => {
+                // 解析出错
+                // 不支持的语法
+                // 1 stop  slave & stop  slave io_thread;
+                // 2 start slave & start slave io_thread;
+                // 3 change master/source to ...
+                // 4 show slave status\G
+                // 5 show status like ''
+                let data = sql.split_once(" ");
+                log::debug!("data: {:?}", data);
+                return Ok(vec![ok_packet(self.client_capabilities, false)]);
             }
         }
 
