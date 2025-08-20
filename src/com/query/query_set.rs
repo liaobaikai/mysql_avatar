@@ -5,7 +5,7 @@ use crate::{com::query::get_var, variable::{get_session_var, Variable}};
 pub fn get_var_setting_key(variable: sqlparser::ast::ObjectName) -> String {
     let mut name = String::new();
     for part in variable.0 {
-        println!("part: {:?}", part);
+        // log::debug!("get_var_setting_key::part: {:?}", part);
         match part {
             sqlparser::ast::ObjectNamePart::Identifier(id) => {
                 name.push_str(&id.value);

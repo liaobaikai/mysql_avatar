@@ -14,7 +14,9 @@ use mysql_common::binlog::{BinlogFileHeader, EventStreamReader};
 use mysql_common::io::ParseBuf;
 use mysql_common::misc::raw::RawInt;
 use crate::consts::Command;
+use crate::variable::get_global_var;
 pub mod index;
+pub mod event;
 
 #[allow(unused)]
 #[derive(Debug, Clone, Default)]
@@ -40,7 +42,7 @@ pub fn match_binlog_command(input: &mut BytesMut) -> Result<Option<Command>> {
     let mut buf = ParseBuf(&input);
     let com_val: RawInt<u8> = buf.parse(())?;
     let com: Command = Command::try_from(*com_val)?;
-    println!("match_binlog_command::com: {:?}", com);
+    log::debug!("match_binlog_command::com: {:?}", com);
     match com {
         Command::COM_BINLOG_DUMP | Command::COM_BINLOG_DUMP_GTID => Ok(Some(com)),
         _ => Ok(None),
@@ -129,12 +131,19 @@ pub struct MyBinlogFileReader {
     filename: PathBuf,
     // binlog位点
     pos: u64,
+    server_id: u32,
+}
+
+fn get_server_id() -> u32 {
+    let var = get_global_var("server_id").unwrap();
+    let server_id: u32 = var.value().parse().unwrap_or(1);
+    server_id
 }
 
 #[allow(unused)]
 impl<'a> MyBinlogFileReader {
     pub fn new() -> Self {
-        Self { offset: 0, filename: PathBuf::new(), pos: 0 }
+        Self { offset: 0, filename: PathBuf::new(), pos: 0, server_id: get_server_id() }
     }
 
     // 可以设置当前文件，用于文件切换
@@ -164,6 +173,15 @@ impl<'a> MyBinlogFileReader {
         self.pos
     }
 
+    pub fn with_server_id(&mut self, server_id: u32) {
+        self.server_id = server_id;
+    }
+
+    pub fn server_id(&self) -> u32 {
+        self.server_id
+    }
+    
+
     // 如果文件不存在，则直接报错
     pub fn try_from(filename: PathBuf) -> Result<Self> {
         if let Err(e) = File::open(&filename) {
@@ -174,6 +192,7 @@ impl<'a> MyBinlogFileReader {
             offset: 0,
             pos: 0,
             filename,
+            server_id: get_server_id()
         })
     }
 
@@ -201,7 +220,7 @@ impl<'a> MyBinlogFileReader {
             if event.header().log_pos() < skip_pos {
                 continue;
             }
-            println!(
+            log::trace!(
                 "[{:?}] event: {:?}",
                 thread::current().id(),
                 event.header().event_type()
@@ -231,7 +250,7 @@ impl<'a> MyBinlogFileReader {
     pub fn get_binlog_file(&mut self) -> Result<BinlogFile<BufReader<File>>> {
         let mut file = File::open(&self.filename)?;
         let file_size = file.metadata()?.len();
-        log::debug!("get_binlog_file:: self.offset: {}", self.offset);
+        log::debug!("get_binlog_file:: filename: {} offset: {}", self.filename.display(), self.offset);
         let binlog_file = if self.offset > 0 {
             file.seek(io::SeekFrom::Start(self.offset))?;
             BinlogFile::from(BufReader::new(file))
@@ -263,7 +282,7 @@ impl<'a> MyBinlogFileReader {
         file.seek(io::SeekFrom::Start(self.offset))?;
         let mut binlog_file = BinlogFile::from(BufReader::new(file));
         while let Some(event) = binlog_file.next() {
-            println!(
+            log::trace!(
                 "[{:?}] event: {:?}",
                 thread::current().id(),
                 event?.header().event_type()

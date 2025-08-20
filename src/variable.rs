@@ -24,7 +24,7 @@ lazy_static! {
         
         vars.push(Variable::new("default_authentication_plugin".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "mysql_native_password".to_owned()));
         vars.push(Variable::new("datadir".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "".to_owned()));
-        vars.push(Variable::new("relay_log_basename".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "/Users/lbk/mysqltest/data/binlog/".to_owned()));
+        vars.push(Variable::new("relay_log_basename".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "C:/Users/BK-liao/mysqltest/data/binlog".to_owned()));
         vars.push(Variable::new("relay_log_index".to_owned(), VARIABLE_SCOPE_GLOBAL, false, "mysql-bin.index".to_owned()));
 
         vars.push(Variable::new(SESSION_CHARSET_KEY_NAME.to_owned(), VARIABLE_SCOPE_SESSION, true, "utf8".to_string()));
@@ -120,7 +120,7 @@ pub fn set_session_var(session_vars: &mut Vec<Variable>, name: &str, value: &str
     }
     if !exists {
         session_vars.push(Variable::new(name.to_owned(), VARIABLE_SCOPE_SESSION, true, value.to_string()));
-        log::debug!("set_session_var::session_vars: {:?}", session_vars);
+        log::debug!("{:?}", session_vars);
     }
     Ok(())
 }
@@ -134,5 +134,13 @@ pub fn get_session_var(session_vars: &Vec<Variable>, name: &str) -> Result<Varia
             return Ok(var.clone());
         }
     }
+
+    if name.starts_with("@@") {
+        // 返回错误信息
+    } else if name.starts_with("@") {
+        // 返回默认空值的参数
+        return Ok(Variable::new(name.to_owned(), VARIABLE_SCOPE_SESSION, true, String::new()));
+    }
+
     Err(anyhow!("Unknown {} variable '{}'", if name.starts_with("@@") { "system" } else { "user" }, name))
 }

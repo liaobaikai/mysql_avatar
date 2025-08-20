@@ -128,14 +128,14 @@ impl<'a> Queryable for SqlCommand<'a> {
             match stmt {
                 Statement::Query(q) => match *q.body {
                     SetExpr::Select(s) => {
-                        println!("select: {:?}", s);
+                        // log::debug!("query::select: {:?}", s);
                         return self.select(*s);
                     }
                     _ => {}
                 },
 
                 Statement::Set(s) => {
-                    println!("set: {:?}", s);
+                    // log::debug!("query::set: {:?}", s);
                     return self.set(s);
                 }
 
@@ -144,7 +144,7 @@ impl<'a> Queryable for SqlCommand<'a> {
                     global,
                     session,
                 } => {
-                    println!("ShowVariables::filter: {:?}", filter);
+                    // log::debug!("ShowVariables::filter: {:?}", filter);
                     return self.show(filter, global, session);
                 }
 
@@ -172,7 +172,7 @@ impl<'a> Queryable for SqlCommand<'a> {
         let mut column_values: Vec<BytesMut> = vec![];
 
         for item in s.projection {
-            println!("item: {:?}", item);
+            // log::debug!("item: {:?}", item);
             let kv_pair = match item {
                 SelectItem::UnnamedExpr(exp) => match exp {
                     // 函数
@@ -236,7 +236,7 @@ impl<'a> Queryable for SqlCommand<'a> {
                 for variable in assignments {
                     let name = get_var_setting_key(variable.name);
                     let value = get_var_setting_value(&mut self.session_vars, variable.value)?;
-                    println!("value: {:?}", value);
+                    log::debug!("value: {:?}", value);
                     set_session_var(&mut self.session_vars, &name, &value)?;
                 }
             }
@@ -280,7 +280,7 @@ impl<'a> Queryable for SqlCommand<'a> {
         match filter {
             Some(f) => match f {
                 sqlparser::ast::ShowStatementFilter::Like(v) => {
-                    println!("v: {}", v);
+                    log::debug!("show::v: {}", v);
                     let mut column_definitions: Vec<BytesMut> = vec![];
                     let mut column_values: Vec<BytesMut> = vec![];
 

@@ -1,0 +1,16 @@
+[mysqld]
+version = "8.0.43"
+version_comment = "MySQL Community Server (GPL)"
+innodb_version = "8.0.43"
+protocol_version = 10
+server_id = 1
+binlog_checksum = "CRC32"
+gtid_mode = "OFF"
+rpl_semi_sync_master_enabled = 1
+rpl_semi_sync_source_enabled = 1
+
+default_authentication_plugin = "mysql_native_password"
+datadir = "/data"
+relay_log_basename = "C:/Users/BK-liao/mysqltest/data/binlog"
+relay_log_index = "mysql-bin.index"
+
