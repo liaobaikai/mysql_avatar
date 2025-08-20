@@ -164,17 +164,19 @@ pub async fn init_server(port: u16) -> Result<()> {
             'outer: loop {
                 // let cloned_session_vars = session_vars.clone();
                 select! {
-                        // Ok(_) = cloned_rx.changed(), if open_binlog_dump => {
-                        //     // 收到binlog变更的事件
-                        //     log::debug!("cloned_rx.changed...::: {:?}", open_binlog_dump);
-                        //     let filename = format!("{}", *cloned_rx.borrow_and_update());
-                        //     handle_binlog_changed(&filename, &mut binlog_reader, rpl_semi_sync_master_enabled, &mut open_need_ack, &mut socket, &mut packet_codec).await.unwrap();
-                        // }
+                    // biased;
+                        Ok(_) = cloned_rx.changed(), if open_binlog_dump => {
+                            // 收到binlog变更的事件
+                            log::debug!("cloned_rx.changed...::: {:?}", open_binlog_dump);
+                            let filename = format!("{}", *cloned_rx.borrow_and_update());
+                            handle_binlog_changed(&filename, &mut binlog_reader, rpl_semi_sync_master_enabled, &mut open_need_ack, &mut socket, &mut packet_codec).await.unwrap();
+                        }
 
                         // Ok(_) = tokio::time::timeout(Duration::from_millis(500), socket.writable()) => {
-                        Ok(ready) = socket.ready(Interest::WRITABLE) => {
-                        // Ok(ready) = tokio::time::timeout(Duration::from_millis(500), socket.ready(Interest::WRITABLE)) => {
-                            if ready.is_writable() && !buffer.is_empty() {
+                        // Ok(ready) = socket.ready(Interest::WRITABLE) => {
+                        //     log::debug!("socket.ready(Interest::WRITABLE)...");
+                        Ok(_) = socket.writable(), if !buffer.is_empty() => {
+                            // if ready.is_writable() && !buffer.is_empty() {
                                 log::debug!("socket.writable...");
                                 // 可以写数据
                                 // 添加包头
@@ -194,13 +196,15 @@ pub async fn init_server(port: u16) -> Result<()> {
                                     // continue;
                                 }
                                 
-                            }
+                            // }
                         }
 
                         // Ok(ready) = tokio::time::timeout(Duration::from_millis(500), socket.writable()) => {
-                        Ok(ready) = socket.ready(Interest::READABLE) => {
-                            if ready.is_readable() {
-                        // Ok(_) = tokio::time::timeout(Duration::from_millis(500), socket.readable()) => {
+                        // Ok(ready) = socket.ready(Interest::READABLE) => {
+                        //     log::debug!("socket.ready(Interest::READABLE)...");
+                        //     if ready.is_readable() {
+
+                        Ok(_) = socket.readable() => {
                                 log::debug!("socket.readable...{:?}", phase);
                                 // let mut timeout = false;
                                 // 可以读数据
@@ -286,13 +290,13 @@ pub async fn init_server(port: u16) -> Result<()> {
                                     _ => {
                                         // 其他阶段
                                     }
-                                }
+                                // }
                                 // }
                             }
                         }
-                        _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                            log::trace!("sleep 1s");
-                        }
+                        // _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                        //     log::trace!("sleep 1s");
+                        // }
                         
 
                     }
