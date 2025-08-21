@@ -38,6 +38,9 @@ pub enum Command {
     COM_BINLOG_DUMP_GTID,
     COM_RESET_CONNECTION,
     COM_END,
+
+    // 其他命令
+    OTHER
 }
 
 // https://dev.mysql.com/doc/dev/mysql-server/latest/group__group__cs__column__definition__flags.html

@@ -32,6 +32,7 @@ use crate::{
 
 pub mod query_select_func;
 pub mod query_set;
+pub mod query_sql_parse;
 
 pub fn text_resultset_col_count_packet(column_count: u64) -> BytesMut {
     let mut buffer = BytesMut::new();
@@ -126,63 +127,86 @@ pub fn get_var(
 
 impl<'a> Queryable for SqlCommand<'a> {
     fn query(&mut self, sql: &str) -> Result<Vec<BytesMut>> {
-        match Parser::parse_sql(&MySqlDialect {}, &sql) {
-            Ok(stmts) => {
-                for stmt in stmts {
-                    match stmt {
-                        Statement::Query(q) => match *q.body {
-                            SetExpr::Select(s) => {
-                                // log::debug!("query::select: {:?}", s);
-                                return self.select(*s);
-                            }
-                            _ => {}
-                        },
-
-                        Statement::Set(s) => {
-                            // log::debug!("query::set: {:?}", s);
-                            return self.set(s);
-                        }
-
-                        Statement::ShowVariables {
-                            filter,
-                            global,
-                            session,
-                        } => {
-                            // log::debug!("ShowVariables::filter: {:?}", filter);
-                            return self.show(filter, global, session);
-                        }
-
-                        Statement::ShowStatus { filter, global, session } => {
-                            // 半同步的情况
-                            // Rpl_semi_sync_master_clients
-                            // Rpl_semi_sync_master_get_ack
-                            // Rpl_semi_sync_master_request_ack
-                            // Rpl_semi_sync_master_status
-                            // 
-                        }
-
-                        _ => {
-                            // 4 show slave status\G
-                            log::info!("Other: {:?}", stmt);
-                        }
+        // match  {
+        //     Ok(stmts) => {
+        for stmt in Parser::parse_sql(&MySqlDialect {}, &sql)? {
+            match stmt {
+                Statement::Query(q) => match *q.body {
+                    SetExpr::Select(s) => {
+                        // log::debug!("query::select: {:?}", s);
+                        return self.select(*s);
                     }
+                    _ => {}
+                },
+
+                Statement::Set(s) => {
+                    // log::debug!("query::set: {:?}", s);
+                    return self.set(s);
+                }
+
+                Statement::ShowVariables {
+                    filter,
+                    global,
+                    session,
+                } => {
+                    // log::debug!("ShowVariables::filter: {:?}", filter);
+                    return self.show(filter, global, session);
+                }
+
+                Statement::ShowStatus {
+                    filter,
+                    global,
+                    session,
+                } => {
+                    // 半同步的情况
+                    // Rpl_semi_sync_master_clients
+                    // Rpl_semi_sync_master_get_ack
+                    // Rpl_semi_sync_master_request_ack
+                    // Rpl_semi_sync_master_status
+                    //
+                }
+
+                _ => {
+                    // 4 show slave status\G
+                    log::info!("Other: {:?}", stmt);
                 }
             }
-            Err(_e) => {
-                // 解析出错
-                // 不支持的语法
-                // 1 stop  slave & stop  slave io_thread;
-                // 2 start slave & start slave io_thread;
-                // 3 change master/source to ...
-                // 4 show slave status\G
-                // 5 show status like ''
-                let data = sql.split_once(" ");
-                log::debug!("data: {:?}", data);
-                return Ok(vec![ok_packet(self.client_capabilities, false)]);
-            }
         }
+        // }
+        // Err(_e) => {
+        // 解析出错
+        // 不支持的语法
+        // 1 stop  slave & stop  slave io_thread;
+        // 2 start slave & start slave io_thread;
+        // 3 change master/source to ...
+        // 4 show slave status\G
+        // 5 show status like ''
+        // let data = sql.split_once(" ");
+        // match sql.split_once(" ") {
+        //     Some((s1, s2)) => {
+        //         let mut io_thread = IoThread::new();
+        //         match s1.trim().to_lowercase().as_str() {
+        //             "stop" => {
+        //                 // slave
+        //                 io_thread.stop();
+        //             },
+        //             "start" => {
+        //                 // slave
+        //                 io_thread.start().await?;
 
-        Ok(vec![])
+        //             }
+        //             _ => {}
+        //         }
+        //     }
+        //     None => {}
+        // }
+
+        // log::debug!("data: {:?}", data);
+        //     return Ok(vec![ok_packet(self.client_capabilities, false)]);
+        // }
+        // }
+
+        Ok(vec![ok_packet(self.client_capabilities, false)])
     }
 
     fn select_func(&mut self, f: Function) -> Result<KvPair> {

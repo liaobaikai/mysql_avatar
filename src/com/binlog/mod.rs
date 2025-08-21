@@ -19,6 +19,7 @@ use mysql_common::packets::ComRegisterSlave;
 use mysql_common::proto::MyDeserialize;
 pub mod event;
 pub mod index;
+pub mod io_thread;
 
 #[allow(unused)]
 #[derive(Debug, Clone, Default)]
@@ -357,6 +358,7 @@ impl<'a> MyBinlogFileReader {
     // }
 }
 
+#[allow(unused)]
 #[derive(Debug, Clone)]
 pub struct ReplicaInfo {
     // slave server_id
@@ -447,6 +449,7 @@ pub struct MasterInfo {
     rpl_semi_sync_source_enabled: bool,
 }
 
+#[allow(unused)]
 impl MasterInfo {
     pub fn new() -> Self {
         Self { server_id: 0, rpl_semi_sync_master_enabled: false, rpl_semi_sync_source_enabled: false }

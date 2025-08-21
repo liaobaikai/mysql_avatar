@@ -18,14 +18,12 @@ use tokio::{
 use crate::{
     auth::handshake::Handshake,
     com::{
-        SqlCommand,
         binlog::{
-            MasterInfo, MyBinlogFileReader, ReplicaInfo, event_to_bytes, index::BinlogIndex,
-            match_binlog_command,
-        },
+            event_to_bytes, index::BinlogIndex, match_binlog_command, MasterInfo, MyBinlogFileReader, ReplicaInfo
+        }, parse_com_query, SqlCommand
     },
     consts::Command,
-    variable::{SYSVARS, Variable, get_global_var},
+    variable::{get_global_var, Variable, SYSVARS},
 };
 
 // 缓冲区大小
@@ -168,19 +166,13 @@ pub async fn init_server(port: u16) -> Result<()> {
 
             let mut phase = ConnectionLifecycle::ConnectionPhaseInitialHandshake;
             let mut buffer = handshake.init_plain_packet();
-            // 是否开始dump binlog
-            // let mut open_binlog_dump = false;
-            // let mut open_need_ack = false;
-
             let mut replica = ReplicaInfo::new();
 
             'outer: loop {
                 select! {
-                // biased;
-                    Ok(_) = cloned_rx.changed() => {
-                    // Ok(_) = cloned_rx.changed(), if open_binlog_dump => {
+                    Ok(_) = cloned_rx.changed(), if replica.binlog_dump() || replica.binlog_dump_gtid() => {
                         // 收到binlog变更的事件
-                        log::debug!("cloned_rx.changed...::: binlog_dump:{}, binlog_dump_gtid:{}", replica.binlog_dump(), replica.binlog_dump_gtid());
+                        log::debug!("rx.changed::binlog_dump:{}, binlog_dump_gtid:{}", replica.binlog_dump(), replica.binlog_dump_gtid());
                         let filename = format!("{}", *cloned_rx.borrow_and_update());
                         handle_binlog_changed(&filename, &mut binlog_reader, &master_info, &mut replica, &mut socket, &mut packet_codec).await.unwrap();
                     },
@@ -188,7 +180,7 @@ pub async fn init_server(port: u16) -> Result<()> {
                     Ok(ready) = socket.ready(Interest::READABLE | Interest::WRITABLE) => {
 
                         if ready.is_writable() && !buffer.is_empty() {
-                            log::debug!("socket.writable...");
+                            log::debug!("socket::writable...{:?}", phase);
                             // 可以写数据
                             // 添加包头
                             match phase {
@@ -212,7 +204,7 @@ pub async fn init_server(port: u16) -> Result<()> {
 
 
                         } else if ready.is_readable() {
-                            log::debug!("socket.readable...{:?}", phase);
+                            log::debug!("socket::readable...{:?}", phase);
                             // let mut timeout = false;
                             // 可以读数据
                             match net_read(&mut socket).await {
@@ -227,7 +219,6 @@ pub async fn init_server(port: u16) -> Result<()> {
                                     break 'outer;
                                 }
                             };
-                            log::debug!("socket.readable...net_read...ok....{:?}", phase);
 
                             // if !timeout {
                             match phase {
@@ -279,17 +270,39 @@ pub async fn init_server(port: u16) -> Result<()> {
                                         }
                                         buffer.clear();
                                     } else {
-                                        let mut data = sql_command.read(&mut buffer, &mut replica).unwrap();
-                                        buffer.clear();
-                                        'inner: loop {
-                                            if data.is_empty() {
-                                                break 'inner;
+
+                                        match sql_command.read(&mut buffer, &mut replica) {
+                                            Err(e) => {
+                                                if let Some(io_err) = e.downcast_ref::<std::io::Error>(){
+                                                    if io_err.kind() == std::io::ErrorKind::ConnectionAborted {
+                                                        log::info!("Connection disconnect from slave");
+                                                        break 'outer;
+                                                    }
+                                                } else if let Some(_) = e.downcast_ref::<sqlparser::parser::ParserError>() {
+                                                    let (com, sql) = parse_com_query(&buffer).unwrap();
+                                                    match com {
+                                                        Command::COM_QUERY => {
+                                                            log::error!("SQL: {}", sql);
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                    
+                                                }
+                                                continue;
                                             }
-                                            let mut packet = data.remove(0);
-                                            let mut dst = encode_packet(&mut packet, &mut packet_codec).unwrap();
-                                            net_write(&mut socket, &mut dst).await.unwrap();
+                                            Ok(mut data) => {
+                                                buffer.clear();
+                                                'inner: loop {
+                                                    if data.is_empty() {
+                                                        break 'inner;
+                                                    }
+                                                    let mut packet = data.remove(0);
+                                                    let mut dst = encode_packet(&mut packet, &mut packet_codec).unwrap();
+                                                    net_write(&mut socket, &mut dst).await.unwrap();
+                                                }
+                                                phase = ConnectionLifecycle::CommandPhase;
+                                            }
                                         }
-                                        phase = ConnectionLifecycle::CommandPhase;
                                     }
                                 }
                                 _ => {
@@ -299,11 +312,6 @@ pub async fn init_server(port: u16) -> Result<()> {
                             }
                         }
                     }
-                    // _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                    //     log::trace!("sleep 1s");
-                    // }
-
-
                 }
             }
             log::info!("Connection shutdown");
@@ -335,7 +343,8 @@ async fn handle_binlog_changed(
     log::debug!(
         "rpl_semi_sync_master_enabled={}, need_ack={}, filename: {}",
         master.rpl_semi_sync_master_enabled() & replica.rpl_semi_sync_replica(),
-        replica.need_ack(), filename
+        replica.need_ack(),
+        filename
     );
     // 发送心跳包
     if *filename == format!("{}", EventType::HEARTBEAT_EVENT as u8) {
@@ -496,7 +505,11 @@ async fn binlog_dump(
             continue;
         }
 
-        log::trace!("event::header::server_id:{}, replica::server_id:{}", event.header().server_id(), replica.server_id());
+        log::trace!(
+            "event::header::server_id:{}, replica::server_id:{}",
+            event.header().server_id(),
+            replica.server_id()
+        );
         if event.header().server_id() == replica.server_id() {
             return Err(anyhow!(
                 "Slave has same server-id as master ({})",

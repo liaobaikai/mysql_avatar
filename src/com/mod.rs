@@ -1,4 +1,6 @@
-use anyhow::{Result, anyhow};
+use std::borrow::Cow;
+
+use anyhow::{Result};
 use bytes::BytesMut;
 use mysql_async::consts::CapabilityFlags;
 use mysql_common::{
@@ -12,6 +14,22 @@ use crate::{com::binlog::{parse_com_register_slave, ReplicaInfo}, consts::Comman
 
 pub mod binlog;
 pub mod query;
+
+// 解析命令
+// 返回具体的命令和sql
+pub fn parse_com_query<'a>(input: &BytesMut) -> Result<(Command, String)> {
+    let mut buf = ParseBuf(&input);
+    let com_val: RawInt<u8> = buf.parse(())?;
+    let command: Command = Command::try_from(*com_val)?;
+    match command {
+        Command::COM_QUERY => {
+            let query: RawBytes<EofBytes> = buf.parse(())?;
+            return Ok((command, query.as_str().to_string()));
+        }
+        _ => {}
+    }
+    Ok((command, String::new()))
+}
 
 pub trait Queryable {
     fn query(&mut self, sql: &str) -> Result<Vec<BytesMut>>;
@@ -70,19 +88,16 @@ impl<'a> SqlCommand<'a> {
         self.client_capabilities.insert(client_capabilities);
     }
 
+    // 读取并解析命令,如果sqlparse不支持,则抛出错误信息
+    // 
     pub fn read(&mut self, input: &mut BytesMut, replica: &mut ReplicaInfo) -> Result<Vec<BytesMut>> {
-        let mut buf = ParseBuf(&input);
-        let com_val: RawInt<u8> = buf.parse(())?;
-        let command: Command = Command::try_from(*com_val)?;
-
+        let (command, sql) = parse_com_query(input)?;
         match command {
             Command::COM_QUERY => {
-                let query: RawBytes<EofBytes> = buf.parse(())?;
-                let packets = self.query(&query.as_str())?;
-                return Ok(packets);
+                return Ok(self.query(&sql)?);
             }
             Command::COM_QUIT => {
-                return Err(anyhow!("Connection closed"));
+                return Err(anyhow::Error::new::<std::io::Error>(std::io::ErrorKind::ConnectionAborted.into()));
             }
             Command::COM_REGISTER_SLAVE => {
                 let com_register_slave = parse_com_register_slave(&input)?;
