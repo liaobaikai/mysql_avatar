@@ -82,8 +82,12 @@ impl<'a> SqlCommand<'a> {
         get_session_var(&self.session_vars, name)
     }
 
-    pub fn set_client_capabilities(&mut self, client_capabilities: CapabilityFlags) {
+    pub fn with_client_capabilities(&mut self, client_capabilities: CapabilityFlags) {
         self.client_capabilities.insert(client_capabilities);
+    }
+
+    pub fn client_capabilities(&self) -> CapabilityFlags {
+        self.client_capabilities
     }
 
     // 读取并解析命令,如果sqlparse不支持,则抛出错误信息

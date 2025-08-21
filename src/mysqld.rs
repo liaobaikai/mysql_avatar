@@ -19,8 +19,8 @@ use crate::{
     auth::handshake::Handshake,
     com::{
         binlog::{
-            event_to_bytes, index::BinlogIndex, match_binlog_command, MasterInfo, MyBinlogFileReader, ReplicaInfo
-        }, parse_com_query, SqlCommand
+            event_to_bytes, index::BinlogIndex, io_thread::start_io_thread, match_binlog_command, MasterInfo, MyBinlogFileReader, ReplicaInfo
+        }, ok_packet, parse_com_query, query::query_sql_parse::{parse_sql_ext, ChangeReplicationSourceTo, ReplicaStatement}, SqlCommand
     },
     consts::Command,
     variable::{get_global_var, Variable, SYSVARS},
@@ -167,6 +167,9 @@ pub async fn init_server(port: u16) -> Result<()> {
             let mut phase = ConnectionLifecycle::ConnectionPhaseInitialHandshake;
             let mut buffer = handshake.init_plain_packet();
             let mut replica = ReplicaInfo::new();
+            //
+            let mut crst = ChangeReplicationSourceTo::new();
+            let mut io_thread_handles = Vec::new();
 
             'outer: loop {
                 select! {
@@ -229,7 +232,7 @@ pub async fn init_server(port: u16) -> Result<()> {
                                         // 验证通过
                                         phase = ConnectionLifecycle::ConnectionPhaseAuthenticationResponse;
                                     }
-                                    sql_command.set_client_capabilities(*handshake.client_capabilities());
+                                    sql_command.with_client_capabilities(*handshake.client_capabilities());
                                     let mut dst = encode_packet(&mut packet, &mut packet_codec).unwrap();
                                     net_write(&mut socket, &mut dst).await.unwrap();
 
@@ -274,22 +277,38 @@ pub async fn init_server(port: u16) -> Result<()> {
                                         match sql_command.read(&mut buffer, &mut replica) {
                                             Err(e) => {
                                                 if let Some(io_err) = e.downcast_ref::<std::io::Error>(){
-                                                    // 
+                                                    //
                                                     if io_err.kind() == std::io::ErrorKind::ConnectionAborted {
                                                         log::info!("Connection disconnect from slave");
                                                         break 'outer;
                                                     }
                                                 } else if let Some(_) = e.downcast_ref::<sqlparser::parser::ParserError>() {
-                                                    // 
+                                                    //
                                                     let (com, sql) = parse_com_query(&buffer).unwrap();
-                                                    match com {
-                                                        Command::COM_QUERY => {
-                                                            log::error!("SQL: {}", sql);
+                                                    let rs = match com {
+                                                        Command::COM_QUERY => parse_sql_ext(&sql).unwrap(),
+                                                        _ => ReplicaStatement::Unknown
+                                                    };
+                                                    match rs {
+                                                        ReplicaStatement::StartReplica(_) => {
+                                                            // 启动一个io_thread接收日志
+                                                            io_thread_handles.push(start_io_thread(&mut crst).await.unwrap());
+                                                        },
+                                                        ReplicaStatement::ChangeReplicationSourceTo(crst_) => {
+                                                            crst = crst_;
+                                                        },
+                                                        ReplicaStatement::StopReplica => {
+                                                            for handle in &io_thread_handles {
+                                                                handle.abort();
+                                                            }
                                                         }
                                                         _ => {}
                                                     }
-                                                    
                                                 }
+
+                                                let mut packet = ok_packet(sql_command.client_capabilities(), false);
+                                                let mut dst = encode_packet(&mut packet, &mut packet_codec).unwrap();
+                                                net_write(&mut socket, &mut dst).await.unwrap();
                                                 continue;
                                             }
                                             Ok(mut data) => {
