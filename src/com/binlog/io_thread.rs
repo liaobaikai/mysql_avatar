@@ -9,14 +9,16 @@ use tokio::task::JoinError;
 
 use crate::com::query::query_sql_parse::ChangeReplicationSourceTo;
 
-pub async fn start_io_thread(crst: &mut ChangeReplicationSourceTo) -> Result<tokio::task::JoinHandle<()>, JoinError> {
+pub async fn start_io_thread(crst: &mut ChangeReplicationSourceTo) -> Result<(), JoinError> {
     let cloned_crst = crst.clone();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         loop {
 
             println!("io_thread running....{:?}", cloned_crst);
 
             tokio::time::sleep(Duration::from_secs(3)).await;
         }
-    }).await
+    }).await;
+
+    handle.unwrap()
 }

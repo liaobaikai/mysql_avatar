@@ -1,4 +1,4 @@
-use std::{ffi::OsStr, io, path::Path, time::Duration};
+use std::{ffi::OsStr, io, path::Path, sync::{atomic::AtomicBool, Arc}, time::Duration};
 
 use anyhow::{Result, anyhow};
 use bytes::BytesMut;
@@ -169,7 +169,8 @@ pub async fn init_server(port: u16) -> Result<()> {
             let mut replica = ReplicaInfo::new();
             //
             let mut crst = ChangeReplicationSourceTo::new();
-            let mut io_thread_handles = Vec::new();
+            // let mut io_thread_handles = Vec::new();
+            let task_executed = Arc::new(AtomicBool::new(false));
 
             'outer: loop {
                 select! {
@@ -292,15 +293,16 @@ pub async fn init_server(port: u16) -> Result<()> {
                                                     match rs {
                                                         ReplicaStatement::StartReplica(_) => {
                                                             // 启动一个io_thread接收日志
-                                                            io_thread_handles.push(start_io_thread(&mut crst).await.unwrap());
+                                                            // io_thread_handles.push();
+                                                            start_io_thread(&mut crst).await.unwrap();
                                                         },
                                                         ReplicaStatement::ChangeReplicationSourceTo(crst_) => {
                                                             crst = crst_;
                                                         },
                                                         ReplicaStatement::StopReplica => {
-                                                            for handle in &io_thread_handles {
-                                                                handle.abort();
-                                                            }
+                                                            // for handle in &io_thread_handles {
+                                                            //     handle.abort();
+                                                            // }
                                                         }
                                                         _ => {}
                                                     }
