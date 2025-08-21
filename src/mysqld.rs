@@ -274,11 +274,13 @@ pub async fn init_server(port: u16) -> Result<()> {
                                         match sql_command.read(&mut buffer, &mut replica) {
                                             Err(e) => {
                                                 if let Some(io_err) = e.downcast_ref::<std::io::Error>(){
+                                                    // 
                                                     if io_err.kind() == std::io::ErrorKind::ConnectionAborted {
                                                         log::info!("Connection disconnect from slave");
                                                         break 'outer;
                                                     }
                                                 } else if let Some(_) = e.downcast_ref::<sqlparser::parser::ParserError>() {
+                                                    // 
                                                     let (com, sql) = parse_com_query(&buffer).unwrap();
                                                     match com {
                                                         Command::COM_QUERY => {

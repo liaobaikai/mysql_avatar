@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use anyhow::{Result};
 use bytes::BytesMut;
 use mysql_async::consts::CapabilityFlags;
